@@ -1,88 +1,74 @@
 import { connect } from 'cloudflare:sockets';
 import md5 from 'md5';
-
-const KDF_SALT = {
-    LEN_KEY: "VMess Header AEAD Key_Length",
-    LEN_IV: "VMess Header AEAD Nonce_Length",
-    PAYLOAD_KEY: "VMess Header AEAD Key",
-    PAYLOAD_IV: "VMess Header AEAD Nonce",
-    RESP_LEN_KEY: "AEAD Resp Header Len Key",
-    RESP_LEN_IV: "AEAD Resp Header Len IV",
-    RESP_KEY: "AEAD Resp Header Key",
-    RESP_IV: "AEAD Resp Header IV"
-};
+import { kdf } from '../utils/hash.js';
+import { KDFSALT, parseAddr, parsePort } from '../utils/common.js';
 
 export async function handleVmess(server, buffer, uuidStr, wsReadable, proxyHost, proxyPort) {
     try {
         if (buffer.length < 42) throw new Error("Packet too short for VMess AEAD");
 
+
         const uuidBytes = hexToBytes(uuidStr.replace(/-/g, ''));
-        const keyString = "c48619fe-8f02-49e0-b9e9-edf763e17e21"; 
+        const constantKey = new TextEncoder().encode("c48619fe-8f02-49e0-b9e9-edf763e17e21");
+        const combinedKey = new Uint8Array(uuidBytes.length + constantKey.length);
+        combinedKey.set(uuidBytes);
+        combinedKey.set(constantKey, uuidBytes.length);
         
-        const baseKeyStr = md5(new Uint8Array([...uuidBytes, ...new TextEncoder().encode(keyString)]));
-        const baseKey = hexToBytes(baseKeyStr);
+        const baseKeyHex = md5(combinedKey);
+        const baseKey = hexToBytes(baseKeyHex);
 
-        const authId = buffer.slice(0, 16);
-        const headerLenEnc = buffer.slice(16, 34);
-        const nonce = buffer.slice(34, 42);
+        let cursor = 0;
+        const authId = buffer.subarray(cursor, cursor + 16);
+        cursor += 16;
+        const lenEnc = buffer.subarray(cursor, cursor + 18);
+        cursor += 18;
+        const nonce = buffer.subarray(cursor, cursor + 8);
+        cursor += 8;
 
-        const lenKey = (await kdf(baseKey, [KDF_SALT.LEN_KEY, authId, nonce])).slice(0, 16);
-        const lenIv = (await kdf(baseKey, [KDF_SALT.LEN_IV, authId, nonce])).slice(0, 12);
+        const lenKey = (await kdf(baseKey, [KDFSALT.VMESS_HEADER_PAYLOAD_LENGTH_AEAD_KEY, authId, nonce])).subarray(0, 16);
+        const lenIv = (await kdf(baseKey, [KDFSALT.VMESS_HEADER_PAYLOAD_LENGTH_AEAD_IV, authId, nonce])).subarray(0, 12);
+
+        const decryptedLenBuf = await aesGcmDecrypt(lenKey, lenIv, lenEnc, authId);
+        const headerLength = (decryptedLenBuf[0] << 8) | decryptedLenBuf[1];
+
+
+        const cmdEncLen = headerLength + 16;
+        const cmdEnc = buffer.subarray(cursor, cursor + cmdEncLen);
+        cursor += cmdEncLen;
+
+        const payloadKey = (await kdf(baseKey, [KDFSALT.VMESS_HEADER_PAYLOAD_AEAD_KEY, authId, nonce])).subarray(0, 16);
+        const payloadIv = (await kdf(baseKey, [KDFSALT.VMESS_HEADER_PAYLOAD_AEAD_IV, authId, nonce])).subarray(0, 12);
+
+        const headerPayload = await aesGcmDecrypt(payloadKey, payloadIv, cmdEnc, authId);
+
+        let pCursor = 0;
+        const version = headerPayload[pCursor];
+        pCursor += 1;
+        if (version !== 1) throw new Error("invalid vmess version");
+
+        pCursor += 32;
         
-        const cryptoLenKey = await crypto.subtle.importKey("raw", lenKey, { name: "AES-GCM" }, false, ["decrypt"]);
-        const decryptedLenBuf = await crypto.subtle.decrypt(
-            { name: "AES-GCM", iv: lenIv, additionalData: authId }, 
-            cryptoLenKey, 
-            headerLenEnc
-        );
-        const headerLength = new DataView(decryptedLenBuf).getUint16(0, false);
+        pCursor += 4;
 
-        const expectedTotalLen = 42 + headerLength + 16; 
-        if (buffer.length < expectedTotalLen) throw new Error("Incomplete VMess Payload");
+        const cmd = headerPayload[pCursor];
+        pCursor += 1;
+        const isTcp = cmd === 0x1;
 
-        const payloadEnc = buffer.slice(42, expectedTotalLen);
-        const payloadKey = (await kdf(baseKey, [KDF_SALT.PAYLOAD_KEY, authId, nonce])).slice(0, 16);
-        const payloadIv = (await kdf(baseKey, [KDF_SALT.PAYLOAD_IV, authId, nonce])).slice(0, 12);
+        const portRes = parsePort(headerPayload, pCursor);
+        const port = portRes.port;
+        pCursor = portRes.cursor;
 
-        const cryptoPayloadKey = await crypto.subtle.importKey("raw", payloadKey, { name: "AES-GCM" }, false, ["decrypt"]);
-        const headerPayload = await crypto.subtle.decrypt(
-            { name: "AES-GCM", iv: payloadIv, additionalData: authId }, 
-            cryptoPayloadKey, 
-            payloadEnc
-        );
+        const addrRes = parseAddr(headerPayload, pCursor);
+        const address = addrRes.address;
 
-        const headerView = new Uint8Array(headerPayload);
-        
-        if (headerView[0] !== 1) throw new Error("Invalid VMess version");
-
-        const resIv = headerView.slice(1, 17);
-        const resKey = headerView.slice(17, 33);
-        const cmd = headerView[38]; 
-        
-        const port = (headerView[39] << 8) | headerView[40];
-        const addrType = headerView[41];
-        let cursor = 42;
-        let address = '';
-
-        if (addrType === 1) { 
-            address = `${headerView[cursor]}.${headerView[cursor+1]}.${headerView[cursor+2]}.${headerView[cursor+3]}`;
-            cursor += 4;
-        } else if (addrType === 2) { 
-            const domainLen = headerView[cursor];
-            cursor += 1;
-            address = new TextDecoder().decode(headerView.slice(cursor, cursor + domainLen));
-            cursor += domainLen;
-        }
-
-        const isTcp = cmd === 1;
+        const rawData = buffer.subarray(cursor);
         const targetHost = proxyHost || address;
         const targetPort = proxyPort || port;
 
         if (isTcp) {
             const remoteSocket = connect({ hostname: targetHost, port: targetPort });
             const writer = remoteSocket.writable.getWriter();
-            
-            const rawData = buffer.slice(expectedTotalLen);
+
             if (rawData.length > 0) {
                 await writer.write(rawData);
             }
@@ -91,37 +77,47 @@ export async function handleVmess(server, buffer, uuidStr, wsReadable, proxyHost
             wsReadable.pipeTo(remoteSocket.writable).catch(() => {});
 
             remoteSocket.readable.pipeTo(new WritableStream({
-                write(data) { if (server.readyState === 1) server.send(data); }
+                write(data) {
+                    if (server.readyState === 1) {
+                        server.send(data);
+                    }
+                }
             })).catch(() => {});
         } else {
-            server.close(1003, "UDP Not Supported");
+            server.close(1003, "UDP over VMess not supported yet");
         }
     } catch (err) {
-        server.close(1011, `VMess Error: ${err.message}`);
+        server.close(1011, `VMess Parsing Error: ${err.message}`);
     }
 }
 
-async function kdf(key, paths) {
-    let current = await crypto.subtle.importKey(
-        "raw", new TextEncoder().encode("VMess AEAD KDF"),
-        { name: "HMAC", hash: "SHA-256" }, false, ["sign"]
+// Helper pendukung AES-GCM Decrypt menggunakan Web Crypto API
+async function aesGcmDecrypt(keyBytes, ivBytes, ciphertext, additionalData) {
+    const cryptoKey = await crypto.subtle.importKey(
+        "raw",
+        keyBytes,
+        { name: "AES-GCM" },
+        false,
+        ["decrypt"]
     );
 
-    for (const p of paths) {
-        const pathBuf = typeof p === 'string' ? new TextEncoder().encode(p) : p;
-        const signature = await crypto.subtle.sign("HMAC", current, pathBuf);
-        current = await crypto.subtle.importKey(
-            "raw", signature,
-            { name: "HMAC", hash: "SHA-256" }, false, ["sign"]
-        );
-    }
-    const keyBuf = typeof key === 'string' ? new TextEncoder().encode(key) : key;
-    const finalHash = await crypto.subtle.sign("HMAC", current, keyBuf);
-    return new Uint8Array(finalHash);
+    const decrypted = await crypto.subtle.decrypt(
+        {
+            name: "AES-GCM",
+            iv: ivBytes,
+            additionalData: additionalData,
+        },
+        cryptoKey,
+        ciphertext
+    );
+
+    return new Uint8Array(decrypted);
 }
 
 function hexToBytes(hex) {
     let bytes = [];
-    for (let c = 0; c < hex.length; c += 2) bytes.push(parseInt(hex.substr(c, 2), 16));
+    for (let c = 0; c < hex.length; c += 2) {
+        bytes.push(parseInt(hex.substr(c, 2), 16));
+    }
     return new Uint8Array(bytes);
 }
