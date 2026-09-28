@@ -1,4 +1,4 @@
-name = "proxy"
+name = "v2ray"
 main = "src/index.js"
 compatibility_date = "2024-05-23"
 minify = true
