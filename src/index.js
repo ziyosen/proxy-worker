@@ -103,7 +103,6 @@ function generateLinks(host, uuid) {
     const vlessLink = `vless://${uuid}@${host}:443?encryption=none&type=ws&host=${host}&path=%2FID&security=tls&sni=${host}#Changli vless`;
     const trojanLink = `trojan://${uuid}@${host}:443?encryption=none&type=ws&host=${host}&path=%2FID&security=tls&sni=${host}#Changli trojan`;
 
-    // Shadowsocks sudah dihapus dari daftar output
     const bodyContent = `${vmessLink}\n${vlessLink}\n${trojanLink}`;
     return new Response(bodyContent, {
         status: 200,
@@ -112,6 +111,7 @@ function generateLinks(host, uuid) {
 }
 
 function handleWebSocket(request, proxyHost, proxyPort, uuid) {
+    let released = false;
     const webSocketPair = new WebSocketPair();
     const [client, server] = Object.values(webSocketPair);
     
@@ -121,11 +121,17 @@ function handleWebSocket(request, proxyHost, proxyPort, uuid) {
         start(controller) {
             server.addEventListener('message', (event) => {
                 if (typeof event.data !== 'string') {
-                    controller.enqueue(new Uint8Array(event.data));
+                    try {
+                        controller.enqueue(new Uint8Array(event.data));
+                    } catch (e) {}
                 }
             });
-            server.addEventListener('close', () => controller.close());
-            server.addEventListener('error', (e) => controller.error(e));
+            server.addEventListener('close', () => {
+                try { controller.close(); } catch {}
+            });
+            server.addEventListener('error', (e) => {
+                try { controller.error(e); } catch {}
+            });
         }
     });
 
@@ -133,20 +139,67 @@ function handleWebSocket(request, proxyHost, proxyPort, uuid) {
 
     (async () => {
         try {
-            const { value: chunk, done } = await reader.read();
-            if (done || !chunk) return;
+            
+            let chunks = [];
+            let totalLength = 0;
+            
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done || !value) break;
+                chunks.push(value);
+                totalLength += value.length;
+                
+                if (totalLength >= 60 || chunks.length >= 3) break;
+            }
 
-            reader.releaseLock();
+            let chunk = new Uint8Array(totalLength);
+            let offset = 0;
+            for (let c of chunks) {
+                chunk.set(c, offset);
+                offset += c.length;
+            }
 
-            if (chunk[0] === 0) {
-                await handleVless(server, chunk, wsReadable, proxyHost, proxyPort);
+            if (!released) {
+                reader.releaseLock();
+                released = true;
+            }
+
+            
+            const combinedStream = new ReadableStream({
+                start(controller) {
+                    controller.enqueue(chunk);
+                    
+                    (async () => {
+                        try {
+                            while (true) {
+                                const { value, done } = await reader.read();
+                                if (done) break;
+                                controller.enqueue(value);
+                            }
+                        } catch (err) {
+                            controller.error(err);
+                        } finally {
+                            controller.close();
+                        }
+                    })();
+                }
+            });
+
+    
+            if (chunk.length > 0 && chunk[0] === 0) {
+                await handleVless(server, chunk, combinedStream, proxyHost, proxyPort);
             } else if (chunk.length > 57 && chunk[56] === 13 && chunk[57] === 10) {
-                await handleTrojan(server, chunk, wsReadable, proxyHost, proxyPort);
+                await handleTrojan(server, chunk, combinedStream, proxyHost, proxyPort);
             } else {
-                await handleVmess(server, chunk, uuid, wsReadable, proxyHost, proxyPort);
+                await handleVmess(server, chunk, uuid, combinedStream, proxyHost, proxyPort);
             }
         } catch (err) {
-            if (server.readyState === 1) server.close(1011, err.message);
+            if (!released) {
+                try { reader.releaseLock(); } catch {}
+            }
+            if (server.readyState === 1) {
+                try { server.close(1011, err.message); } catch {}
+            }
         }
     })();
 
