@@ -111,24 +111,40 @@ function handleWebSocket(request, proxyHost, proxyPort, uuid) {
     const [client, server] = Object.values(webSocketPair);
     
     server.accept();
-    
-    server.addEventListener('message', async (event) => {
-        if (typeof event.data === 'string') return;
-        const buffer = new Uint8Array(event.data);
 
-        // VLESS Sniffing
-        if (buffer[0] === 0) {
-            handleVless(server, buffer, proxyHost, proxyPort);
-        }
-        // Trojan Sniffing
-        else if (buffer.length > 57 && buffer[56] === 13 && buffer[57] === 10) {
-            handleTrojan(server, buffer, proxyHost, proxyPort);
-        } 
-        // Fallback ke VMess jika bukan VLESS/Trojan
-        else {
-            handleVmess(server, buffer, uuid, proxyHost, proxyPort);
+    const wsReadable = new ReadableStream({
+        start(controller) {
+            server.addEventListener('message', (event) => {
+                if (typeof event.data !== 'string') {
+                    controller.enqueue(new Uint8Array(event.data));
+                }
+            });
+            server.addEventListener('close', () => controller.close());
+            server.addEventListener('error', (e) => controller.error(e));
         }
     });
+
+    const reader = wsReadable.getReader();
+
+    (async () => {
+        try {
+            const { value: chunk, done } = await reader.read();
+            if (done || !chunk) return;
+
+            // Lepaskan lock agar sisa stream bisa diteruskan ke protokol
+            reader.releaseLock();
+
+            if (chunk[0] === 0) {
+                await handleVless(server, chunk, wsReadable, proxyHost, proxyPort);
+            } else if (chunk.length > 57 && chunk[56] === 13 && chunk[57] === 10) {
+                await handleTrojan(server, chunk, wsReadable, proxyHost, proxyPort);
+            } else {
+                await handleVmess(server, chunk, uuid, wsReadable, proxyHost, proxyPort);
+            }
+        } catch (err) {
+            if (server.readyState === 1) server.close(1011, err.message);
+        }
+    })();
 
     return new Response(null, {
         status: 101,
