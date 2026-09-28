@@ -1,0 +1,22 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "xray",
+  "main": "src/index.js",
+  "compatibility_date": "2024-09-23",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "account_id": "ea1aab81dc8e22018131832d124a54fc",
+  "workers_dev": true,
+  "minify": true,
+  "vars": {
+    "UUID": "2bcfbfba-b446-4ad5-93ad-72af9e008f61",
+    "PROXY_PORT": "443"
+  },
+  "kv_namespaces": [
+    {
+      "binding": "YUMI",
+      "id": "8ff1913fa986482d967e0a5c7e2b0791"
+    }
+  ]
+}
