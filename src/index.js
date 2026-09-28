@@ -1,5 +1,6 @@
 import { handleVless } from './protocols/vless.js';
 import { handleTrojan } from './protocols/trojan.js';
+import { handleVmess } from './protocols/vmess.js';
 
 const PROXYIP_PATTERN = /^.+-\d+$/;
 const PROXYKV_PATTERN = /^([A-Z]{2})/;
@@ -53,7 +54,6 @@ async function getProxyIPFromKV(kv, proxyipParam) {
     let proxyKvStr = await kv.get("proxy_kv");
 
     if (!proxyKvStr) {
-        
         const ghUrl = "https://raw.githubusercontent.com/ziyosen/tunel-worker/refs/heads/main/proxy.json";
         const res = await fetch(ghUrl);
         
@@ -80,7 +80,7 @@ async function getProxyIPFromKV(kv, proxyipParam) {
 
 function generateLinks(host, uuid) {
     const vmessConfig = {
-        ps: "Changli vmess",
+        ps: "ZeinthHub vmess",
         v: "2",
         add: host,
         port: "80",
@@ -98,9 +98,9 @@ function generateLinks(host, uuid) {
     
     const vmessLink = `vmess://${btoa(JSON.stringify(vmessConfig))}`;
     const vlessLink = `vless://${uuid}@${host}:443?encryption=none&type=ws&host=${host}&path=%2FID&security=tls&sni=${host}#ZeinthHub vless`;
-    const trojanLink = `trojan://${uuid}@${host}:443?encryption=none&type=ws&host=${host}&path=%2FID&security=tls&sni=${host}#ZeinhHub trojan`;
+    const trojanLink = `trojan://${uuid}@${host}:443?encryption=none&type=ws&host=${host}&path=%2FID&security=tls&sni=${host}#ZeinthHub trojan`;
 
-    return new Response(`${vmessLink}\n${vlessLink}\n${trojanLink}\n${ssLink}`, {
+    return new Response(`${vmessLink}\n${vlessLink}\n${trojanLink}`, {
         status: 200,
         headers: { "Content-Type": "text/plain;charset=utf-8" }
     });
@@ -116,14 +116,17 @@ function handleWebSocket(request, proxyHost, proxyPort, uuid) {
         if (typeof event.data === 'string') return;
         const buffer = new Uint8Array(event.data);
 
+        // VLESS Sniffing
         if (buffer[0] === 0) {
             handleVless(server, buffer, proxyHost, proxyPort);
         }
+        // Trojan Sniffing
         else if (buffer.length > 57 && buffer[56] === 13 && buffer[57] === 10) {
             handleTrojan(server, buffer, proxyHost, proxyPort);
         } 
+        // Fallback ke VMess jika bukan VLESS/Trojan
         else {
-            server.close(1003, "Protocol sniffing failed or VMess WIP");
+            handleVmess(server, buffer, uuid, proxyHost, proxyPort);
         }
     });
 
