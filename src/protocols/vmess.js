@@ -12,7 +12,7 @@ const KDF_SALT = {
     RESP_IV: "AEAD Resp Header IV"
 };
 
-export async function handleVmess(server, buffer, uuidStr, proxyHost, proxyPort) {
+export async function handleVmess(server, buffer, uuidStr, wsReadable, proxyHost, proxyPort) {
     try {
         if (buffer.length < 42) throw new Error("Packet too short for VMess AEAD");
 
@@ -87,6 +87,8 @@ export async function handleVmess(server, buffer, uuidStr, proxyHost, proxyPort)
                 await writer.write(rawData);
             }
             writer.releaseLock();
+
+            wsReadable.pipeTo(remoteSocket.writable).catch(() => {});
 
             remoteSocket.readable.pipeTo(new WritableStream({
                 write(data) { if (server.readyState === 1) server.send(data); }
