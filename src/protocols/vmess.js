@@ -1,12 +1,11 @@
 import { connect } from 'cloudflare:sockets';
 import md5 from 'md5';
-import { kdf } from '../utils/hash.js';
+import { kdf, sha256 } from '../utils/hash.js';
 import { KDFSALT, parseAddr, parsePort } from '../utils/common.js';
 
 export async function handleVmess(server, buffer, uuidStr, wsReadable, proxyHost, proxyPort) {
     try {
         if (buffer.length < 42) throw new Error("Packet too short for VMess AEAD");
-
 
         const uuidBytes = hexToBytes(uuidStr.replace(/-/g, ''));
         const constantKey = new TextEncoder().encode("c48619fe-8f02-49e0-b9e9-edf763e17e21");
@@ -31,7 +30,6 @@ export async function handleVmess(server, buffer, uuidStr, wsReadable, proxyHost
         const decryptedLenBuf = await aesGcmDecrypt(lenKey, lenIv, lenEnc, authId);
         const headerLength = (decryptedLenBuf[0] << 8) | decryptedLenBuf[1];
 
-
         const cmdEncLen = headerLength + 16;
         const cmdEnc = buffer.subarray(cursor, cursor + cmdEncLen);
         cursor += cmdEncLen;
@@ -46,8 +44,13 @@ export async function handleVmess(server, buffer, uuidStr, wsReadable, proxyHost
         pCursor += 1;
         if (version !== 1) throw new Error("invalid vmess version");
 
-        pCursor += 32;
-        
+        const iv = headerPayload.subarray(pCursor, pCursor + 16);
+        pCursor += 16;
+        const key = headerPayload.subarray(pCursor, pCursor + 16);
+        pCursor += 16;
+
+        // options
+        const options = headerPayload.subarray(pCursor, pCursor + 4);
         pCursor += 4;
 
         const cmd = headerPayload[pCursor];
@@ -60,6 +63,32 @@ export async function handleVmess(server, buffer, uuidStr, wsReadable, proxyHost
 
         const addrRes = parseAddr(headerPayload, pCursor);
         const address = addrRes.address;
+
+        // --- TAMBAHAN KRUSIAL: Kirim Response Header VMess (Meniru vmess.rs)[span_4](start_span)[span_4](end_span) ---
+        const derivedKey = (await sha256(key)).subarray(0, 16);
+        const derivedIv = (await sha256(iv)).subarray(0, 16);
+
+        const respLenKey = (await kdf(derivedKey, [KDFSALT.AEAD_RESP_HEADER_LEN_KEY])).subarray(0, 16);
+        const respLenIv = (await kdf(derivedIv, [KDFSALT.AEAD_RESP_HEADER_LEN_IV])).subarray(0, 12);
+        
+        // Enkripsi panjang respons (4 bytes)[span_5](start_span)[span_5](end_span)
+        const encryptedLength = await aesGcmEncrypt(respLenKey, respLenIv, new Uint8Array([0, 0, 0, 4]));
+
+        const respKey = (await kdf(derivedKey, [KDFSALT.AEAD_RESP_HEADER_KEY])).subarray(0, 16);
+        const respIv = (await kdf(derivedIv, [KDFSALT.AEAD_RESP_HEADER_IV])).subarray(0, 12);
+        
+        // Enkripsi isi header respons[span_6](start_span)[span_6](end_span)
+        const headerData = new Uint8Array([options[0], 0, 0, 0]);
+        const encryptedHeader = await aesGcmEncrypt(respKey, respIv, headerData);
+
+        // Gabungkan dan kirim ke klien via WebSocket sebelum data TCP jalan
+        if (server.readyState === 1) {
+            const responseHeaderBuf = new Uint8Array(encryptedLength.length + encryptedHeader.length);
+            responseHeaderBuf.set(encryptedLength, 0);
+            responseHeaderBuf.set(encryptedHeader, encryptedLength.length);
+            server.send(responseHeaderBuf);
+        }
+        // -----------------------------------------------------------------------------
 
         const rawData = buffer.subarray(cursor);
         const targetHost = proxyHost || address;
@@ -74,24 +103,38 @@ export async function handleVmess(server, buffer, uuidStr, wsReadable, proxyHost
             }
             writer.releaseLock();
 
-            wsReadable.pipeTo(remoteSocket.writable).catch(() => {});
+            wsReadable.pipeTo(new WritableStream({
+                async write(chunk) {
+                    const w = remoteSocket.writable.getWriter();
+                    await w.write(chunk);
+                    w.releaseLock();
+                },
+                abort(err) {
+                    try { remoteSocket.close(); } catch {}
+                }
+            })).catch(() => {});
 
             remoteSocket.readable.pipeTo(new WritableStream({
                 write(data) {
                     if (server.readyState === 1) {
-                        server.send(data);
+                        try {
+                            server.send(data);
+                        } catch (e) {}
                     }
                 }
             })).catch(() => {});
         } else {
-            server.close(1003, "UDP over VMess not supported yet");
+            if (server.readyState === 1) {
+                server.close(1003, "UDP over VMess not supported yet");
+            }
         }
     } catch (err) {
-        server.close(1011, `VMess Parsing Error: ${err.message}`);
+        if (server.readyState === 1) {
+            server.close(1011, `VMess Parsing Error: ${err.message}`);
+        }
     }
 }
 
-// Helper pendukung AES-GCM Decrypt menggunakan Web Crypto API
 async function aesGcmDecrypt(keyBytes, ivBytes, ciphertext, additionalData) {
     const cryptoKey = await crypto.subtle.importKey(
         "raw",
@@ -112,6 +155,27 @@ async function aesGcmDecrypt(keyBytes, ivBytes, ciphertext, additionalData) {
     );
 
     return new Uint8Array(decrypted);
+}
+
+async function aesGcmEncrypt(keyBytes, ivBytes, data) {
+    const cryptoKey = await crypto.subtle.importKey(
+        "raw",
+        keyBytes,
+        { name: "AES-GCM" },
+        false,
+        ["encrypt"]
+    );
+
+    const encrypted = await crypto.subtle.encrypt(
+        {
+            name: "AES-GCM",
+            iv: ivBytes,
+        },
+        cryptoKey,
+        data
+    );
+
+    return new Uint8Array(encrypted);
 }
 
 function hexToBytes(hex) {
