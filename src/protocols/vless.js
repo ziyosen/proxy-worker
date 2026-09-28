@@ -1,37 +1,31 @@
 import { connect } from 'cloudflare:sockets';
+import { parseAddr, parsePort } from '../utils/common.js';
 
 export async function handleVless(server, buffer, wsReadable, proxyHost, proxyPort) {
     try {
-        let cursor = 1; 
-        cursor += 16;   
+        let cursor = 0;
+
         
-        const optLen = buffer[cursor];
-        cursor += 1 + optLen; 
-
-        const isTcp = buffer[cursor] === 1; 
         cursor += 1;
 
-        const port = (buffer[cursor] << 8) | buffer[cursor + 1];
-        cursor += 2;
+        cursor += 16;
 
-        const addrType = buffer[cursor];
+    
+        const mLen = buffer[cursor];
+        cursor += 1 + mLen;
+
+        
+        const networkType = buffer[cursor];
         cursor += 1;
+        const isTcp = networkType === 1;
 
-        let address = '';
-        if (addrType === 1) { 
-            address = `${buffer[cursor]}.${buffer[cursor+1]}.${buffer[cursor+2]}.${buffer[cursor+3]}`;
-            cursor += 4;
-        } else if (addrType === 2 || addrType === 3) { 
-            const domainLen = buffer[cursor];
-            cursor += 1;
-            address = new TextDecoder().decode(buffer.subarray(cursor, cursor + domainLen));
-            cursor += domainLen;
-        } else if (addrType === 4) { 
-            address = Array.from(buffer.subarray(cursor, cursor + 16))
-                .map((b, i) => (i % 2 === 0 ? ((b << 8) | buffer[cursor + i + 1]).toString(16) : null))
-                .filter(Boolean).join(':');
-            cursor += 16;
-        }
+        const portRes = parsePort(buffer, cursor);
+        const port = portRes.port;
+        cursor = portRes.cursor;
+
+        const addrRes = parseAddr(buffer, cursor);
+        const address = addrRes.address;
+        cursor = addrRes.cursor;
 
         const rawData = buffer.subarray(cursor);
         const targetHost = proxyHost || address;
@@ -40,7 +34,7 @@ export async function handleVless(server, buffer, wsReadable, proxyHost, proxyPo
         if (isTcp) {
             const remoteSocket = connect({ hostname: targetHost, port: targetPort });
             const writer = remoteSocket.writable.getWriter();
-            
+
             server.send(new Uint8Array([0, 0]));
 
             if (rawData.length > 0) {
@@ -48,15 +42,18 @@ export async function handleVless(server, buffer, wsReadable, proxyHost, proxyPo
             }
             writer.releaseLock();
 
-            // Pipa WebSocket -> Remote
+            
             wsReadable.pipeTo(remoteSocket.writable).catch(() => {});
 
-            // Pipa Remote -> WebSocket
             remoteSocket.readable.pipeTo(new WritableStream({
-                write(data) { if (server.readyState === 1) server.send(data); }
+                write(data) {
+                    if (server.readyState === 1) {
+                        server.send(data);
+                    }
+                }
             })).catch(() => {});
         } else {
-            server.close(1003, "UDP Not Supported");
+            server.close(1003, "UDP over VLESS not supported yet");
         }
     } catch (err) {
         server.close(1011, "VLESS Parsing Error");
