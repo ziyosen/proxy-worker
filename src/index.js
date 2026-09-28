@@ -21,10 +21,11 @@ export default {
             let proxyip = "";
             if (path.startsWith('/Benxx-Project/')) {
                 proxyip = path.replace('/Benxx-Project/', '');
-            } else {
+            } else if (path !== '/' && path !== '') {
                 proxyip = path.substring(1); 
             }
 
+            // Jika tidak ada proxyip atau hanya root, kembalikan respon standar seperti "hi from wasm!"
             if (!proxyip) {
                 return new Response("hi from wasm!", { status: 200 });
             }
@@ -33,6 +34,7 @@ export default {
                 proxyip = await getProxyIPFromKV(env.YUMI, proxyip);
             }
 
+            // Validasi persis seperti logika Rust: pastikan request websocket dan format proxyip valid (IP-Port)
             if (request.headers.get("Upgrade") === "websocket" && PROXYIP_PATTERN.test(proxyip)) {
                 let [proxyHost, proxyPort] = proxyip.split('-');
                 proxyPort = parseInt(proxyPort) || 443;
@@ -50,11 +52,10 @@ export default {
 async function getProxyIPFromKV(kv, proxyipParam) {
     if (!kv) return proxyipParam; 
     
-    const kvidList = proxyipParam.split(',');
+    let kvidList = proxyipParam.split(',');
     let proxyKvStr = await kv.get("proxy_kv");
 
     if (!proxyKvStr) {
-        console.log("getting proxy kv from github...");
         const ghUrl = "https://raw.githubusercontent.com/ziyosen/tunel-worker/refs/heads/main/proxy.json";
         const res = await fetch(ghUrl);
         
@@ -139,36 +140,17 @@ function handleWebSocket(request, proxyHost, proxyPort, uuid) {
 
     (async () => {
         try {
-            
-            let chunks = [];
-            let totalLength = 0;
-            
-            while (true) {
-                const { value, done } = await reader.read();
-                if (done || !value) break;
-                chunks.push(value);
-                totalLength += value.length;
-                
-                if (totalLength >= 60 || chunks.length >= 3) break;
-            }
-
-            let chunk = new Uint8Array(totalLength);
-            let offset = 0;
-            for (let c of chunks) {
-                chunk.set(c, offset);
-                offset += c.length;
-            }
+            const { value: chunk, done } = await reader.read();
+            if (done || !chunk) return;
 
             if (!released) {
                 reader.releaseLock();
                 released = true;
             }
 
-            
             const combinedStream = new ReadableStream({
                 start(controller) {
                     controller.enqueue(chunk);
-                    
                     (async () => {
                         try {
                             while (true) {
@@ -185,8 +167,7 @@ function handleWebSocket(request, proxyHost, proxyPort, uuid) {
                 }
             });
 
-    
-            if (chunk.length > 0 && chunk[0] === 0) {
+            if (chunk[0] === 0) {
                 await handleVless(server, chunk, combinedStream, proxyHost, proxyPort);
             } else if (chunk.length > 57 && chunk[56] === 13 && chunk[57] === 10) {
                 await handleTrojan(server, chunk, combinedStream, proxyHost, proxyPort);
