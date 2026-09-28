@@ -45,30 +45,39 @@ export async function handleVless(server, buffer, wsReadable, proxyHost, proxyPo
             if (rawData.length > 0) {
                 await writer.write(rawData);
             }
-            writer.releaseLock();
 
-            // Alirkan data dari WebSocket ke TCP remote secara aman
-            wsReadable.pipeTo(new WritableStream({
-                async write(chunk) {
-                    const w = remoteSocket.writable.getWriter();
-                    await w.write(chunk);
-                    w.releaseLock();
-                },
-                abort(err) {
-                    try { remoteSocket.close(); } catch {}
-                }
-            })).catch(() => {});
-
-            // Alirkan data balik dari TCP remote ke WebSocket
-            remoteSocket.readable.pipeTo(new WritableStream({
-                write(data) {
-                    if (server.readyState === 1) {
-                        try {
-                            server.send(data);
-                        } catch (e) {}
+            // Alirkan data dari WebSocket ke TCP remote secara aman (Gunakan 1 writer global)
+            (async () => {
+                try {
+                    const reader = wsReadable.getReader();
+                    while (true) {
+                        const { value, done } = await reader.read();
+                        if (done) break;
+                        if (value) {
+                            await writer.write(value);
+                        }
                     }
+                } catch (e) {
+                } finally {
+                    try { writer.releaseLock(); } catch {}
                 }
-            })).catch(() => {});
+            })();
+
+            // Alirkan data balik dari TCP remote ke WebSocket (Gunakan loop reader)
+            (async () => {
+                try {
+                    const readerRemote = remoteSocket.readable.getReader();
+                    while (true) {
+                        const { value, done } = await readerRemote.read();
+                        if (done) break;
+                        if (value && server.readyState === 1) {
+                            server.send(value);
+                        }
+                    }
+                } catch (e) {
+                }
+            })();
+
         } else {
             if (server.readyState === 1) {
                 server.close(1003, "UDP over VLESS not supported yet");
