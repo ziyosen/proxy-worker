@@ -1,9 +1,8 @@
 export class Config {
-    constructor(uuid, host, proxy_addr, proxy_port) {
+    constructor(uuid, host, proxyAddr, proxyPort) {
         this.uuid = uuid;
         this.host = host;
-        this.proxy_addr = proxy_addr;
-        this.proxy_port = proxy_port;
+        this.proxyAddr = proxyAddr;
+        this.proxyPort = proxyPort;
     }
 }
-
