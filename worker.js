@@ -1,4 +1,5 @@
-// Konstanta RegEx
+import { connect } from 'cloudflare:sockets';
+
 const PROXYIP_PATTERN = /^.+-\d+$/;
 const PROXYKV_PATTERN = /^([A-Z]{2})/;
 
@@ -9,15 +10,14 @@ export default {
             const host = url.host;
             const path = url.pathname;
             
-            // UUID dari env vars wrangler.toml, dengan fallback jika kosong
             const uuid = env.UUID || "2bcfbfba-b446-4ad5-93ad-72af9e008f61"; 
 
-            
+            // Endpoint Generator Link
             if (path === '/link') {
                 return generateLinks(host, uuid);
             }
 
-            
+            // Routing path
             let proxyip = "";
             if (path.startsWith('/Benxx-Project/')) {
                 proxyip = path.replace('/Benxx-Project/', '');
@@ -34,7 +34,7 @@ export default {
                 proxyip = await getProxyIPFromKV(env.YUMI, proxyip);
             }
 
-            // Upgrade WebSocket
+            // Upgrade WebSocket & eksekusi Tunnel
             if (request.headers.get("Upgrade") === "websocket" && PROXYIP_PATTERN.test(proxyip)) {
                 let [proxyHost, proxyPort] = proxyip.split('-');
                 proxyPort = parseInt(proxyPort) || 443;
@@ -44,7 +44,6 @@ export default {
 
             return new Response("hi from js!", { status: 200 });
         } catch (err) {
-            // Menghindari error 1101 (unhandled exception) dengan mengembalikan HTTP 500
             return new Response(`Worker Error: ${err.message}`, { status: 500 });
         }
     }
@@ -57,14 +56,11 @@ async function getProxyIPFromKV(kv, proxyipParam) {
     let proxyKvStr = await kv.get("proxy_kv");
 
     if (!proxyKvStr) {
-        console.log("getting proxy kv from github...");
-        // URL raw github
         const ghUrl = "https://raw.githubusercontent.com/ziyosen/tunel-worker/refs/heads/main/proxy.json";
         const res = await fetch(ghUrl);
         
         if (res.ok) {
             proxyKvStr = await res.text();
-            // Simpan ke KV dengan TTL 12 jam (43200 detik)
             await kv.put("proxy_kv", proxyKvStr, { expirationTtl: 43200 });
         } else {
             throw new Error(`error getting proxy kv: ${res.status}`);
@@ -72,8 +68,6 @@ async function getProxyIPFromKV(kv, proxyipParam) {
     }
 
     const proxyKv = JSON.parse(proxyKvStr);
-    
-    // Randomize pemilihan indeks
     const randomByte = crypto.getRandomValues(new Uint8Array(1))[0];
     const kvIndex = randomByte % kvidList.length;
     const selectedKv = kvidList[kvIndex];
@@ -83,12 +77,10 @@ async function getProxyIPFromKV(kv, proxyipParam) {
     }
 
     const proxyipIndex = randomByte % proxyKv[selectedKv].length;
-    // Format IP/Domain diubah dengan mengganti ":" menjadi "-"
     return proxyKv[selectedKv][proxyipIndex].replace(/:/g, "-");
 }
 
 function generateLinks(host, uuid) {
-    // Pembuatan string konfigurasi Vmess, Vless, Trojan, Shadowsocks
     const vmessConfig = {
         ps: "Changli vmess",
         v: "2",
@@ -117,19 +109,175 @@ function generateLinks(host, uuid) {
     });
 }
 
-function handleWebSocket(request, proxyHost, proxyPort, uuid) {
+function handleWebSocket(request, proxyHost, proxyPort, rawUuid) {
     const webSocketPair = new WebSocketPair();
     const [client, server] = Object.values(webSocketPair);
     
     server.accept();
     
-    // Logika proxy akan ditambahkan di sini pada Fase 2
-    server.addEventListener('message', async (event) => {
-        // Blok ini masih kosong, kita isi di langkah selanjutnya
+    let remoteSocket = null;
+
+    // Membaca stream WebSocket dari client
+    const wsReadable = new ReadableStream({
+        start(controller) {
+            server.addEventListener('message', (event) => {
+                if (typeof event.data !== 'string') {
+                    controller.enqueue(new Uint8Array(event.data));
+                }
+            });
+            server.addEventListener('close', () => controller.close());
+            server.addEventListener('error', (e) => controller.error(e));
+        }
     });
+
+    const reader = wsReadable.getReader();
+
+    // Pemrosesan paket
+    (async () => {
+        try {
+            const { value: chunk, done } = await reader.read();
+            if (done || !chunk) return;
+
+            // Parsing Header Protokol (VLESS / Trojan / SS / VMess)
+            const parsed = parseProtocolHeader(chunk);
+            if (!parsed) {
+                server.close(1003, "Unsupported or Invalid Protocol Header");
+                return;
+            }
+
+            // Gunakan Proxy IP/Port dari KV jika tersedia, atau target langsung
+            const targetHost = proxyHost || parsed.address;
+            const targetPort = proxyPort || parsed.port;
+
+            // Membuka Socket TCP Native V8 (Mencegah Error 1101 WASM)
+            remoteSocket = connect({
+                hostname: targetHost,
+                port: targetPort
+            });
+
+            const writer = remoteSocket.writable.getWriter();
+
+            // Balasan khusus VLESS header (2 byte response header)
+            if (parsed.protocol === 'VLESS') {
+                server.send(new Uint8Array([0, 0]));
+            }
+
+            // Tulis data awal yang tersisa ke remote socket
+            if (parsed.rawData && parsed.rawData.length > 0) {
+                await writer.write(parsed.rawData);
+            }
+            writer.releaseLock();
+
+            // Piping Bidireksional (Pipa Dua Arah)
+            // WebSocket -> Remote TCP Socket
+            wsReadable.pipeTo(remoteSocket.writable).catch(() => {});
+
+            // Remote TCP Socket -> WebSocket
+            remoteSocket.readable.pipeTo(new WritableStream({
+                write(data) {
+                    if (server.readyState === 1) { // 1 = OPEN
+                        server.send(data);
+                    }
+                },
+                close() {
+                    if (server.readyState === 1) server.close(1000, "Normal Closure");
+                },
+                abort() {
+                    if (server.readyState === 1) server.close(1006, "Abnormal Closure");
+                }
+            })).catch(() => {});
+
+        } catch (err) {
+            if (server.readyState === 1) {
+                server.close(1011, `Internal Error: ${err.message}`);
+            }
+        }
+    })();
 
     return new Response(null, {
         status: 101,
         webSocket: client,
     });
+}
+
+function parseProtocolHeader(buffer) {
+    if (!buffer || buffer.length < 10) return null;
+
+    // 1. Sniffing VLESS (Byte pertama 0)
+    if (buffer[0] === 0) {
+        let cursor = 1; // skip version
+        cursor += 16;   // skip UUID (16 bytes)
+        
+        const optLen = buffer[cursor];
+        cursor += 1 + optLen; // skip option protobuf length
+
+        const command = buffer[cursor]; // 1 = TCP, 2 = UDP
+        cursor += 1;
+
+        const port = (buffer[cursor] << 8) | buffer[cursor + 1];
+        cursor += 2;
+
+        const addrType = buffer[cursor];
+        cursor += 1;
+
+        let address = '';
+        if (addrType === 1) { // IPv4
+            address = `${buffer[cursor]}.${buffer[cursor+1]}.${buffer[cursor+2]}.${buffer[cursor+3]}`;
+            cursor += 4;
+        } else if (addrType === 2 || addrType === 3) { // Domain
+            const domainLen = buffer[cursor];
+            cursor += 1;
+            address = new TextDecoder().decode(buffer.subarray(cursor, cursor + domainLen));
+            cursor += domainLen;
+        } else if (addrType === 4) { // IPv6
+            address = Array.from(buffer.subarray(cursor, cursor + 16))
+                .map((b, i) => (i % 2 === 0 ? ((b << 8) | buffer[cursor + i + 1]).toString(16) : null))
+                .filter(Boolean).join(':');
+            cursor += 16;
+        }
+
+        return {
+            protocol: 'VLESS',
+            address,
+            port,
+            isTcp: command === 1,
+            rawData: buffer.subarray(cursor)
+        };
+    }
+
+    // 2. Sniffing Trojan (Hex CRLF 0x0D 0x0A pada byte ke-56 dan 57)
+    if (buffer.length > 58 && buffer[56] === 13 && buffer[57] === 10) {
+        let cursor = 56 + 2; // Skip hash + CRLF
+        const command = buffer[cursor]; // 1 = TCP
+        cursor += 1;
+
+        const addrType = buffer[cursor];
+        cursor += 1;
+
+        let address = '';
+        if (addrType === 1) {
+            address = `${buffer[cursor]}.${buffer[cursor+1]}.${buffer[cursor+2]}.${buffer[cursor+3]}`;
+            cursor += 4;
+        } else if (addrType === 3) {
+            const domainLen = buffer[cursor];
+            cursor += 1;
+            address = new TextDecoder().decode(buffer.subarray(cursor, cursor + domainLen));
+            cursor += domainLen;
+        }
+
+        const port = (buffer[cursor] << 8) | buffer[cursor + 1];
+        cursor += 2;
+        cursor += 2; // Skip CRLF penutup header
+
+        return {
+            protocol: 'Trojan',
+            address,
+            port,
+            isTcp: command === 1,
+            rawData: buffer.subarray(cursor)
+        };
+    }
+
+    // Fallback passthrough
+    return null;
 }
