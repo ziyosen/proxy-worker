@@ -1,7 +1,7 @@
 {
-  "name": "xray-worker",
+  "name": "xray-worker-js",
   "version": "1.0.0",
-  "description": "Multi-protocol proxy worker (VLESS, Trojan, VMess) for Cloudflare Workers",
+  "description": "VPN Worker",
   "main": "src/index.js",
   "type": "module",
   "scripts": {
@@ -9,6 +9,6 @@
     "deploy": "wrangler deploy"
   },
   "devDependencies": {
-    "wrangler": "^3.100.0"
+    "wrangler": "^3.0.0"
   }
 }
