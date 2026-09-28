@@ -1,4 +1,3 @@
-
 export async function kdf(key, path) {
     let currentKey = await crypto.subtle.importKey(
         "raw",
@@ -24,4 +23,11 @@ export async function kdf(key, path) {
     const finalSig = await crypto.subtle.sign("HMAC", currentKey, keyBytes);
     
     return new Uint8Array(finalSig);
+}
+
+export async function sha256(data) {
+    const encoder = new TextEncoder();
+    const buffer = typeof data === 'string' ? encoder.encode(data) : data;
+    const hashBuffer = await crypto.subtle.digest("SHA-256", buffer);
+    return new Uint8Array(hashBuffer);
 }
