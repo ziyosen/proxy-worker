@@ -20,24 +20,49 @@ export async function handleVless(server, buffer, wsReadable, proxyHost, proxyPo
         cursor += 1;
         const isTcp = networkType === 1;
 
-        // 5. Baca Port dan Alamat
+        // 5. Baca Port dan Alamat dari client
         const portRes = parsePort(buffer, cursor);
-        const port = portRes.port;
+        const clientPort = portRes.port;
         cursor = portRes.cursor;
 
         const addrRes = parseAddr(buffer, cursor);
-        const address = addrRes.address;
+        const clientAddr = addrRes.address;
         cursor = addrRes.cursor;
 
         const rawData = buffer.subarray(cursor);
-        const targetHost = proxyHost || address;
-        const targetPort = proxyPort || port;
 
         if (isTcp) {
-            const remoteSocket = connect({ hostname: targetHost, port: targetPort });
+            // Terapkan addr_pool persis seperti di vless.rs: utamakan tujuan asli, lalu fallback ke proxy IP worker
+            const addrPool = [
+                { host: clientAddr, port: clientPort },
+                { host: proxyHost, port: proxyPort }
+            ];
+
+            let remoteSocket = null;
+            let connected = false;
+
+            // Coba sambungkan secara berurutan sesuai pool
+            for (const target of addrPool) {
+                try {
+                    if (!target.host || !target.port) continue;
+                    const socket = connect({ hostname: target.host, port: target.port });
+                    // Tes buka writer untuk memastikan socket benar-benar merespons
+                    await socket.opened;
+                    remoteSocket = socket;
+                    connected = true;
+                    break;
+                } catch (e) {
+                    // Lanjut ke target berikutnya di addr_pool jika gagal
+                }
+            }
+
+            if (!connected || !remoteSocket) {
+                throw new Error("All TCP outbound connections failed");
+            }
+
             const writer = remoteSocket.writable.getWriter();
 
-            // Kirim balasan header VLESS ke klien
+            // Kirim balasan header VLESS ke klien (2 byte kosong [0, 0])
             if (server.readyState === 1) {
                 server.send(new Uint8Array([0, 0]));
             }
@@ -46,7 +71,7 @@ export async function handleVless(server, buffer, wsReadable, proxyHost, proxyPo
                 await writer.write(rawData);
             }
 
-            // Alirkan data dari WebSocket ke TCP remote secara aman (Gunakan 1 writer global)
+            // Alirkan data dari WebSocket ke TCP remote secara aman
             (async () => {
                 try {
                     const reader = wsReadable.getReader();
@@ -63,7 +88,7 @@ export async function handleVless(server, buffer, wsReadable, proxyHost, proxyPo
                 }
             })();
 
-            // Alirkan data balik dari TCP remote ke WebSocket (Gunakan loop reader)
+            // Alirkan data balik dari TCP remote ke WebSocket menggunakan getReader()
             (async () => {
                 try {
                     const readerRemote = remoteSocket.readable.getReader();
