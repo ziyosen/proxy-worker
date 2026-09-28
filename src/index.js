@@ -26,7 +26,7 @@ export default {
             }
 
             if (!proxyip) {
-                return new Response("hi from js modular!", { status: 200 });
+                return new Response("hi from wasm!", { status: 200 });
             }
 
             if (PROXYKV_PATTERN.test(proxyip)) {
@@ -40,7 +40,7 @@ export default {
                 return handleWebSocket(request, proxyHost, proxyPort, uuid);
             }
 
-            return new Response("hi from js modular!", { status: 200 });
+            return new Response("hi from wasm!", { status: 200 });
         } catch (err) {
             return new Response(`Worker Error: ${err.message}`, { status: 500 });
         }
@@ -54,6 +54,7 @@ async function getProxyIPFromKV(kv, proxyipParam) {
     let proxyKvStr = await kv.get("proxy_kv");
 
     if (!proxyKvStr) {
+        console.log("getting proxy kv from github...");
         const ghUrl = "https://raw.githubusercontent.com/ziyosen/tunel-worker/refs/heads/main/proxy.json";
         const res = await fetch(ghUrl);
         
@@ -80,7 +81,7 @@ async function getProxyIPFromKV(kv, proxyipParam) {
 
 function generateLinks(host, uuid) {
     const vmessConfig = {
-        ps: "ZeinthHub vmess",
+        ps: "Changli vmess",
         v: "2",
         add: host,
         port: "80",
@@ -96,11 +97,15 @@ function generateLinks(host, uuid) {
         alpn: ""
     };
     
-    const vmessLink = `vmess://${btoa(JSON.stringify(vmessConfig))}`;
-    const vlessLink = `vless://${uuid}@${host}:443?encryption=none&type=ws&host=${host}&path=%2FID&security=tls&sni=${host}#ZeinthHub vless`;
-    const trojanLink = `trojan://${uuid}@${host}:443?encryption=none&type=ws&host=${host}&path=%2FID&security=tls&sni=${host}#ZeinthHub trojan`;
+    const base64Vmess = btoa(JSON.stringify(vmessConfig)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const vmessLink = `vmess://${base64Vmess}`;
+    
+    const vlessLink = `vless://${uuid}@${host}:443?encryption=none&type=ws&host=${host}&path=%2FID&security=tls&sni=${host}#Changli vless`;
+    const trojanLink = `trojan://${uuid}@${host}:443?encryption=none&type=ws&host=${host}&path=%2FID&security=tls&sni=${host}#Changli trojan`;
 
-    return new Response(`${vmessLink}\n${vlessLink}\n${trojanLink}`, {
+    // Shadowsocks sudah dihapus dari daftar output
+    const bodyContent = `${vmessLink}\n${vlessLink}\n${trojanLink}`;
+    return new Response(bodyContent, {
         status: 200,
         headers: { "Content-Type": "text/plain;charset=utf-8" }
     });
@@ -131,7 +136,6 @@ function handleWebSocket(request, proxyHost, proxyPort, uuid) {
             const { value: chunk, done } = await reader.read();
             if (done || !chunk) return;
 
-            // Lepaskan lock agar sisa stream bisa diteruskan ke protokol
             reader.releaseLock();
 
             if (chunk[0] === 0) {
