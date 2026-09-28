@@ -5,20 +5,27 @@ export async function handleTrojan(server, buffer, wsReadable, proxyHost, proxyP
     try {
         let cursor = 0;
         
+        
         cursor += 56;
+        
+        
         cursor += 2;
 
+        
         const networkType = buffer[cursor];
         cursor += 1;
         const isTcp = networkType === 1;
 
+    
         const addrResult = parseAddr(buffer, cursor);
         const address = addrResult.address;
         cursor = addrResult.cursor;
 
+        
         const portResult = parsePort(buffer, cursor);
         const port = portResult.port;
-        cursor = portResult.portCursor || portResult.cursor; 
+        cursor = portResult.cursor; 
+        
         
         cursor += 2;
 
