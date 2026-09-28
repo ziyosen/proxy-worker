@@ -1,5 +1,5 @@
 name = "xray"
-main = "worker.js"
+main = "src/index.js"
 compatibility_date = "2024-05-23"
 minify = true
 account_id = "ea1aab81dc8e22018131832d124a54fc"
