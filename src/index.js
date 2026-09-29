@@ -1,4 +1,4 @@
-import { sniffAndRoute } from './conn.js'; // Memanggil router protokol yang sudah kita buat
+import { sniffAndRoute } from './conn.js';
 
 const PROXYIP_PATTERN = /^.+-\d+$/;
 const PROXYKV_PATTERN = /^([A-Z]{2})/;
