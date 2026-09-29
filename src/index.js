@@ -1,6 +1,4 @@
-import { handleVless } from './protocols/vless.js';
-import { handleTrojan } from './protocols/trojan.js';
-import { handleVmess } from './protocols/vmess.js';
+import { sniffAndRoute } from './conn.js'; // Memanggil router protokol yang sudah kita buat
 
 const PROXYIP_PATTERN = /^.+-\d+$/;
 const PROXYKV_PATTERN = /^([A-Z]{2})/;
@@ -25,7 +23,6 @@ export default {
                 proxyip = path.substring(1); 
             }
 
-            // Jika tidak ada proxyip atau hanya root, kembalikan respon standar seperti "hi from wasm!"
             if (!proxyip) {
                 return new Response("hi from wasm!", { status: 200 });
             }
@@ -34,7 +31,6 @@ export default {
                 proxyip = await getProxyIPFromKV(env.YUMI, proxyip);
             }
 
-            // Validasi persis seperti logika Rust: pastikan request websocket dan format proxyip valid (IP-Port)
             if (request.headers.get("Upgrade") === "websocket" && PROXYIP_PATTERN.test(proxyip)) {
                 let [proxyHost, proxyPort] = proxyip.split('-');
                 proxyPort = parseInt(proxyPort) || 443;
@@ -112,27 +108,44 @@ function generateLinks(host, uuid) {
 }
 
 function handleWebSocket(request, proxyHost, proxyPort, uuid) {
-    let released = false;
     const webSocketPair = new WebSocketPair();
-    const [client, server] = Object.values(webSocketPair);
+    const [client, webSocket] = Object.values(webSocketPair);
     
-    server.accept();
+    webSocket.accept();
 
+    let readableStreamCancel = false;
+    
+    // Pembuatan Stream yang lebih bersih dan menangkap Early Data
     const wsReadable = new ReadableStream({
         start(controller) {
-            server.addEventListener('message', (event) => {
-                if (typeof event.data !== 'string') {
-                    try {
-                        controller.enqueue(new Uint8Array(event.data));
-                    } catch (e) {}
+            webSocket.addEventListener('message', (event) => {
+                if (!readableStreamCancel && typeof event.data !== 'string') {
+                    controller.enqueue(new Uint8Array(event.data));
                 }
             });
-            server.addEventListener('close', () => {
-                try { controller.close(); } catch {}
+            webSocket.addEventListener('close', () => {
+                if (!readableStreamCancel) {
+                    readableStreamCancel = true;
+                    try { controller.close(); } catch {}
+                }
             });
-            server.addEventListener('error', (e) => {
-                try { controller.error(e); } catch {}
+            webSocket.addEventListener('error', (err) => {
+                if (!readableStreamCancel) controller.error(err);
             });
+
+            // Tangkap Early Data dari Header (Sangat krusial untuk Xray/V2Ray)
+            const earlyDataHeader = request.headers.get("sec-websocket-protocol") || "";
+            if (earlyDataHeader) {
+                try {
+                    const decode = atob(earlyDataHeader.replace(/-/g, "+").replace(/_/g, "/"));
+                    const earlyData = Uint8Array.from(decode, c => c.charCodeAt(0));
+                    controller.enqueue(earlyData);
+                } catch (e) {}
+            }
+        },
+        cancel(reason) {
+            readableStreamCancel = true;
+            try { webSocket.close(); } catch {}
         }
     });
 
@@ -140,46 +153,20 @@ function handleWebSocket(request, proxyHost, proxyPort, uuid) {
 
     (async () => {
         try {
-            const { value: chunk, done } = await reader.read();
-            if (done || !chunk) return;
+            // Membaca chunk data pertama untuk di-sniff
+            const { value: initialChunk, done } = await reader.read();
+            if (done || !initialChunk) return;
 
-            if (!released) {
-                reader.releaseLock();
-                released = true;
-            }
+            // Lepaskan kunci reader agar stream bisa di-pipe (pipeTo) secara bebas di dalam handler protokol
+            reader.releaseLock();
 
-            const combinedStream = new ReadableStream({
-                start(controller) {
-                    controller.enqueue(chunk);
-                    (async () => {
-                        try {
-                            while (true) {
-                                const { value, done } = await reader.read();
-                                if (done) break;
-                                controller.enqueue(value);
-                            }
-                        } catch (err) {
-                            controller.error(err);
-                        } finally {
-                            controller.close();
-                        }
-                    })();
-                }
-            });
+            // Serahkan ke polisi lalu lintas (conn.js) untuk menentukan protokol
+            await sniffAndRoute(webSocket, wsReadable, initialChunk, uuid, proxyHost, proxyPort);
 
-            if (chunk[0] === 0) {
-                await handleVless(server, chunk, combinedStream, proxyHost, proxyPort);
-            } else if (chunk.length > 57 && chunk[56] === 13 && chunk[57] === 10) {
-                await handleTrojan(server, chunk, combinedStream, proxyHost, proxyPort);
-            } else {
-                await handleVmess(server, chunk, uuid, combinedStream, proxyHost, proxyPort);
-            }
         } catch (err) {
-            if (!released) {
-                try { reader.releaseLock(); } catch {}
-            }
-            if (server.readyState === 1) {
-                try { server.close(1011, err.message); } catch {}
+            try { reader.releaseLock(); } catch {}
+            if (webSocket.readyState === 1) {
+                try { webSocket.close(1011, err.message); } catch {}
             }
         }
     })();
