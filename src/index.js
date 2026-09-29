@@ -1,3 +1,7 @@
+// ============================================
+// VPN CONFIG MANAGER & MULTI-PROTOCOL WORKER
+// ============================================
+
 import { connect } from "cloudflare:sockets";
 
 const CONFIG = {
@@ -62,7 +66,8 @@ async function fetchProxyList() {
 
 async function getProxyFromPath(pathname) {
     if (!pathname || pathname === '/') return null;
-    let proxyip = path.startsWith('/Benxx-Project/') ? path.replace('/Benxx-Project/', '') : (path !== '/' ? path.substring(1) : '');
+    // DIPERBAIKI: Menggunakan parameter 'pathname', bukan 'path'
+    let proxyip = pathname.startsWith('/Benxx-Project/') ? pathname.replace('/Benxx-Project/', '') : '';
 
     if (/^([A-Z]{2})/.test(proxyip)) {
         let kvidList = proxyip.split(',');
@@ -213,22 +218,10 @@ async function aesGcmEncrypt(key, iv, data, aad) {
     return new Uint8Array(encrypted);
 }
 
-// DETEKSI PROTOKOL PRESISI
 async function detectProtocol(buffer, uuidStr) {
-    // 1. Cek VMess terlebih dahulu
     if (await isVMess(buffer, uuidStr)) return PROTOCOLS.P4;
-    
-    // 2. Cek Trojan (\r\n pada byte 56, 57)
-    if (buffer.length >= 58 && buffer[56] === 13 && buffer[57] === 10) {
-        return PROTOCOLS.P1;
-    }
-
-    // 3. Cek VLESS (Version 0x00 & panjang paket >= 24)
-    if (buffer.length >= 24 && buffer[0] === 0) {
-        return PROTOCOLS.P2;
-    }
-
-    // 4. Fallback ke Shadowsocks / Unknown
+    if (buffer.length >= 58 && buffer[56] === 13 && buffer[57] === 10) return PROTOCOLS.P1;
+    if (buffer.length >= 24 && buffer[0] === 0) return PROTOCOLS.P2;
     return PROTOCOLS.P3;
 }
 
@@ -343,16 +336,16 @@ function parseP2Header(buffer) {
     const addressType = buffer[addressIndex];
     let addressLength = 0, addressValueIndex = addressIndex + 1, addressValue = "";
     switch (addressType) {
-        case 1: // IPv4
+        case 1:
             addressLength = 4;
             addressValue = new Uint8Array(buffer.subarray(addressValueIndex, addressValueIndex + 4)).join(".");
             break;
-        case 2: // Domain
+        case 2:
             addressLength = buffer[addressValueIndex];
             addressValueIndex += 1;
             addressValue = arr2str(buffer.subarray(addressValueIndex, addressValueIndex + addressLength));
             break;
-        case 3: // IPv6
+        case 3:
             addressLength = 16;
             const ipv6 = [];
             for (let i = 0; i < 8; i++) ipv6.push(((buffer[addressValueIndex + i * 2] << 8) | buffer[addressValueIndex + i * 2 + 1]).toString(16));
@@ -526,14 +519,16 @@ async function websocketHandler(request, uuid) {
 }
 
 function generateLinks(host, uuid) {
+    // Path di link dikunci wajib menggunakan /Benxx-Project/SG (contoh)
+    const samplePath = "/Benxx-Project/SG";
     const vmessConfig = {
         ps: "Changli vmess", v: "2", add: host, port: "80", id: uuid, aid: "0",
-        scy: "zero", net: "ws", type: "none", host: host, path: "/ID", tls: "", sni: host, alpn: ""
+        scy: "zero", net: "ws", type: "none", host: host, path: samplePath, tls: "", sni: host, alpn: ""
     };
     const base64Vmess = btoa(JSON.stringify(vmessConfig)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
     const vmessLink = `vmess://${base64Vmess}`;
-    const vlessLink = `vless://${uuid}@${host}:443?encryption=none&type=ws&host=${host}&path=%2FID&security=tls&sni=${host}#Changli vless`;
-    const trojanLink = `trojan://${uuid}@${host}:443?encryption=none&type=ws&host=${host}&path=%2FID&security=tls&sni=${host}#Changli trojan`;
+    const vlessLink = `vless://${uuid}@${host}:443?encryption=none&type=ws&host=${host}&path=${encodeURIComponent(samplePath)}&security=tls&sni=${host}#Changli vless`;
+    const trojanLink = `trojan://${uuid}@${host}:443?security=tls&type=ws&host=${host}&path=${encodeURIComponent(samplePath)}&sni=${host}#Changli trojan`;
 
     return new Response(`${vmessLink}\n${vlessLink}\n${trojanLink}`, {
         status: 200,
@@ -551,11 +546,16 @@ export default {
 
             if (path === '/link') return generateLinks(host, uuid);
 
-            let proxyip = path.startsWith('/Benxx-Project/') ? path.replace('/Benxx-Project/', '') : (path !== '/' ? path.substring(1) : '');
+            // KUNCI PATH: Wajib diawali dengan /Benxx-Project/
+            if (!path.startsWith('/Benxx-Project/')) {
+                return new Response("Unauthorized Path", { status: 403 });
+            }
 
-            if (proxyip) {
-                const resolvedProxy = await getProxyFromPath('/' + proxyip);
-                if (resolvedProxy) prxIP = resolvedProxy;
+            const resolvedProxy = await getProxyFromPath(path);
+            if (resolvedProxy) {
+                prxIP = resolvedProxy;
+            } else {
+                return new Response("Invalid Proxy Target in Path", { status: 400 });
             }
 
             if (request.headers.get("Upgrade") === "websocket") {
