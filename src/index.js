@@ -62,8 +62,8 @@ async function fetchProxyList() {
 
 async function getProxyFromPath(pathname) {
     if (!pathname || pathname === '/') return null;
-    let proxyip = pathname.startsWith('/Benxx-Project/') ? pathname.replace('/Benxx-Project/', '') : pathname.substring(1);
-    
+    let proxyip = path.startsWith('/Benxx-Project/') ? path.replace('/Benxx-Project/', '') : (path !== '/' ? path.substring(1) : '');
+
     if (/^([A-Z]{2})/.test(proxyip)) {
         let kvidList = proxyip.split(',');
         let proxyKv = await fetchProxyList();
