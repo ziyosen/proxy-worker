@@ -1,11 +1,9 @@
-
 import { connect } from "cloudflare:sockets";
 
 const CONFIG = {
     cacheTTL: 300000, 
 };
 
-// ==================== BACKEND LOGIC & MULTIPLEXER ====================
 const str2arr = (str) => new TextEncoder().encode(str);
 const arr2str = (arr) => new TextDecoder().decode(arr);
 const concat = (...arrays) => {
@@ -42,17 +40,6 @@ const PROTOCOLS = {
     P3: atob('U2hhZG93c29ja3M='),
     P4: atob('Vk1lc3M=')
 };
-
-const DETECTION_PATTERNS = {
-    DELIMITER_P1: [0x0d, 0x0a],
-    DELIMITER_P1_CHECK: [0x01, 0x03, 0x7f],
-    UUID_V4_REGEX: /^\w{8}\w{4}4\w{3}[89ab]\w{3}\w{12}$/,
-    BUFFER_MIN_SIZE: 62,
-    DELIMITER_OFFSET: 56
-};
-
-const ADDRESS_TYPES = { IPV4: 1, DOMAIN: 2, IPV6: 3, DOMAIN_ALT: 3 };
-const COMMAND_TYPES = { TCP: 1, UDP: 2, UDP_ALT: 3 };
 
 let prxIP = "";
 let cachedProxyList = null;
@@ -226,22 +213,27 @@ async function aesGcmEncrypt(key, iv, data, aad) {
     return new Uint8Array(encrypted);
 }
 
-async function detectProtocol(buffer) {
-    if (await isVMess(buffer)) return PROTOCOLS.P4;
-    if (buffer.byteLength >= DETECTION_PATTERNS.BUFFER_MIN_SIZE) {
-        const delimiter = buffer.slice(DETECTION_PATTERNS.DELIMITER_OFFSET, DETECTION_PATTERNS.DELIMITER_OFFSET + 4);
-        if (delimiter[0] === DETECTION_PATTERNS.DELIMITER_P1[0] && delimiter[1] === DETECTION_PATTERNS.DELIMITER_P1[1]) {
-            if (DETECTION_PATTERNS.DELIMITER_P1_CHECK.includes(delimiter[2]) && DETECTION_PATTERNS.DELIMITER_P1_CHECK.concat([0x04]).includes(delimiter[3])) return PROTOCOLS.P1;
-        }
+// DETEKSI PROTOKOL PRESISI
+async function detectProtocol(buffer, uuidStr) {
+    // 1. Cek VMess terlebih dahulu
+    if (await isVMess(buffer, uuidStr)) return PROTOCOLS.P4;
+    
+    // 2. Cek Trojan (\r\n pada byte 56, 57)
+    if (buffer.length >= 58 && buffer[56] === 13 && buffer[57] === 10) {
+        return PROTOCOLS.P1;
     }
-    const uuidCheck = buffer.slice(1, 17);
-    const hexString = arrayBufferToHex(uuidCheck.buffer);
-    if (DETECTION_PATTERNS.UUID_V4_REGEX.test(hexString)) return PROTOCOLS.P2;
+
+    // 3. Cek VLESS (Version 0x00 & panjang paket >= 24)
+    if (buffer.length >= 24 && buffer[0] === 0) {
+        return PROTOCOLS.P2;
+    }
+
+    // 4. Fallback ke Shadowsocks / Unknown
     return PROTOCOLS.P3;
 }
 
 async function isVMess(buffer, uuidStr) {
-    if (buffer.length < 42) return false;
+    if (!uuidStr || buffer.length < 42) return false;
     try {
         const uuidBytes = toBuffer(uuidStr);
         const auth_id = buffer.subarray(0, 16);
@@ -310,35 +302,32 @@ async function parseP4Header(buffer, uuidStr) {
 }
 
 function parseP3Header(buffer) {
-    const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
-    const addressType = view.getUint8(0);
+    const addressType = buffer[0];
     let addressLength = 0, addressValueIndex = 1, addressValue = "";
     switch (addressType) {
-        case ADDRESS_TYPES.IPV4:
+        case 1:
             addressLength = 4;
-            addressValue = new Uint8Array(buffer.slice(addressValueIndex, addressValueIndex + addressLength)).join(".");
+            addressValue = new Uint8Array(buffer.subarray(addressValueIndex, addressValueIndex + 4)).join(".");
             break;
-        case ADDRESS_TYPES.DOMAIN_ALT:
+        case 3:
             addressLength = buffer[addressValueIndex];
             addressValueIndex += 1;
-            addressValue = arr2str(buffer.slice(addressValueIndex, addressValueIndex + addressLength));
+            addressValue = arr2str(buffer.subarray(addressValueIndex, addressValueIndex + addressLength));
             break;
-        case ADDRESS_TYPES.IPV6:
+        case 4:
             addressLength = 16;
-            const dv = new DataView(buffer.slice(addressValueIndex, addressValueIndex + addressLength).buffer);
             const ipv6 = [];
-            for (let i = 0; i < 8; i++) ipv6.push(dv.getUint16(i * 2).toString(16));
+            for (let i = 0; i < 8; i++) ipv6.push(((buffer[addressValueIndex + i * 2] << 8) | buffer[addressValueIndex + i * 2 + 1]).toString(16));
             addressValue = ipv6.join(":");
             break;
         default:
             return { hasError: true, message: 'Invalid addressType for P3: ' + addressType };
     }
     const portIndex = addressValueIndex + addressLength;
-    const portBuffer = buffer.slice(portIndex, portIndex + 2);
-    const portRemote = new DataView(portBuffer.buffer, portBuffer.byteOffset, 2).getUint16(0);
+    const portRemote = (buffer[portIndex] << 8) | buffer[portIndex + 1];
     return {
         hasError: false, addressRemote: addressValue, addressType, portRemote,
-        rawDataIndex: portIndex + 2, rawClientData: buffer.slice(portIndex + 2), version: null, isUDP: portRemote == DNS_PORT
+        rawDataIndex: portIndex + 2, rawClientData: buffer.subarray(portIndex + 2), version: null, isUDP: portRemote === DNS_PORT
     };
 }
 
@@ -347,70 +336,70 @@ function parseP2Header(buffer) {
     let isUDP = false;
     const optLength = buffer[17];
     const cmd = buffer[18 + optLength];
-    if (cmd === COMMAND_TYPES.UDP) isUDP = true;
+    if (cmd === 2) isUDP = true;
     const portIndex = 18 + optLength + 1;
-    const portBuffer = buffer.slice(portIndex, portIndex + 2);
-    const portRemote = new DataView(portBuffer.buffer, portBuffer.byteOffset, 2).getUint16(0);
+    const portRemote = (buffer[portIndex] << 8) | buffer[portIndex + 1];
     let addressIndex = portIndex + 2;
     const addressType = buffer[addressIndex];
     let addressLength = 0, addressValueIndex = addressIndex + 1, addressValue = "";
     switch (addressType) {
-        case ADDRESS_TYPES.IPV4:
+        case 1: // IPv4
             addressLength = 4;
-            addressValue = new Uint8Array(buffer.slice(addressValueIndex, addressValueIndex + addressLength)).join(".");
+            addressValue = new Uint8Array(buffer.subarray(addressValueIndex, addressValueIndex + 4)).join(".");
             break;
-        case ADDRESS_TYPES.DOMAIN:
+        case 2: // Domain
             addressLength = buffer[addressValueIndex];
             addressValueIndex += 1;
-            addressValue = arr2str(buffer.slice(addressValueIndex, addressValueIndex + addressLength));
+            addressValue = arr2str(buffer.subarray(addressValueIndex, addressValueIndex + addressLength));
             break;
-        case ADDRESS_TYPES.IPV6:
+        case 3: // IPv6
             addressLength = 16;
-            const dv = new DataView(buffer.slice(addressValueIndex, addressValueIndex + addressLength).buffer);
             const ipv6 = [];
-            for (let i = 0; i < 8; i++) ipv6.push(dv.getUint16(i * 2).toString(16));
+            for (let i = 0; i < 8; i++) ipv6.push(((buffer[addressValueIndex + i * 2] << 8) | buffer[addressValueIndex + i * 2 + 1]).toString(16));
             addressValue = ipv6.join(":");
             break;
+        default:
+            return { hasError: true, message: 'Invalid addressType for VLESS: ' + addressType };
     }
     return {
         hasError: false, addressRemote: addressValue, addressType, portRemote,
-        rawDataIndex: addressValueIndex + addressLength, rawClientData: buffer.slice(addressValueIndex + addressLength),
+        rawDataIndex: addressValueIndex + addressLength, rawClientData: buffer.subarray(addressValueIndex + addressLength),
         version: new Uint8Array([version, 0]), isUDP
     };
 }
 
 function parseP1Header(buffer) {
-    const dataBuffer = buffer.slice(58);
+    const dataBuffer = buffer.subarray(58);
+    if (dataBuffer.length < 6) return { hasError: true, message: "Invalid request data for Trojan" };
     let isUDP = false;
-    const view = new DataView(dataBuffer.buffer, dataBuffer.byteOffset, dataBuffer.byteLength);
-    const cmd = view.getUint8(0);
-    if (cmd == COMMAND_TYPES.UDP_ALT) isUDP = true;
-    let addressType = view.getUint8(1);
+    const cmd = dataBuffer[0];
+    if (cmd === 3) isUDP = true;
+    let addressType = dataBuffer[1];
     let addressLength = 0, addressValueIndex = 2, addressValue = "";
     switch (addressType) {
-        case ADDRESS_TYPES.IPV4:
+        case 1:
             addressLength = 4;
-            addressValue = new Uint8Array(dataBuffer.slice(addressValueIndex, addressValueIndex + addressLength)).join(".");
+            addressValue = new Uint8Array(dataBuffer.subarray(addressValueIndex, addressValueIndex + 4)).join(".");
             break;
-        case ADDRESS_TYPES.DOMAIN_ALT:
+        case 3:
             addressLength = dataBuffer[addressValueIndex];
             addressValueIndex += 1;
-            addressValue = arr2str(dataBuffer.slice(addressValueIndex, addressValueIndex + addressLength));
+            addressValue = arr2str(dataBuffer.subarray(addressValueIndex, addressValueIndex + addressLength));
             break;
-        case ADDRESS_TYPES.IPV6:
+        case 4:
             addressLength = 16;
-            const dv = new DataView(dataBuffer.slice(addressValueIndex, addressValueIndex + addressLength).buffer);
             const ipv6 = [];
-            for (let i = 0; i < 8; i++) ipv6.push(dv.getUint16(i * 2).toString(16));
+            for (let i = 0; i < 8; i++) ipv6.push(((dataBuffer[addressValueIndex + i * 2] << 8) | dataBuffer[addressValueIndex + i * 2 + 1]).toString(16));
             addressValue = ipv6.join(":");
             break;
+        default:
+            return { hasError: true, message: 'Invalid addressType for Trojan: ' + addressType };
     }
     const portIndex = addressValueIndex + addressLength;
-    const portBuffer = dataBuffer.slice(portIndex, portIndex + 2);
-    const portRemote = new DataView(portBuffer.buffer, portBuffer.byteOffset, 2).getUint16(0);
+    const portRemote = (dataBuffer[portIndex] << 8) | dataBuffer[portIndex + 1];
     return {
         hasError: false, addressRemote: addressValue, addressType, portRemote,
-        rawDataIndex: portIndex + 4, rawClientData: dataBuffer.slice(portIndex + 4), version: null, isUDP
+        rawDataIndex: portIndex + 4, rawClientData: dataBuffer.subarray(portIndex + 4), version: null, isUDP
     };
 }
 
@@ -430,9 +419,6 @@ async function remoteSocketToWS(remoteSocket, webSocket, responseHeader) {
     })).catch(() => {
         safeCloseWebSocket(webSocket);
     });
-    if (!hasIncomingData && prxIP) {
-        // Fallback retry otomatis jika koneksi pertama gagal
-    }
 }
 
 async function handleTCPOutbound(remoteSocket, addressRemote, portRemote, rawClientData, webSocket, responseHeader) {
@@ -447,9 +433,13 @@ async function handleTCPOutbound(remoteSocket, addressRemote, portRemote, rawCli
     async function retry() {
         const targetHost = (prxIP ? prxIP.split(/[:=-]/)[0] : addressRemote);
         const targetPort = (prxIP ? parseInt(prxIP.split(/[:=-]/)[1]) : portRemote);
-        const tcpSocket = await connectAndWrite(targetHost, targetPort);
-        tcpSocket.closed.catch(() => {}).finally(() => safeCloseWebSocket(webSocket));
-        remoteSocketToWS(tcpSocket, webSocket, responseHeader);
+        try {
+            const tcpSocket = await connectAndWrite(targetHost, targetPort);
+            tcpSocket.closed.catch(() => {}).finally(() => safeCloseWebSocket(webSocket));
+            remoteSocketToWS(tcpSocket, webSocket, responseHeader);
+        } catch (e) {
+            safeCloseWebSocket(webSocket);
+        }
     }
     try {
         const tcpSocket = await connectAndWrite(addressRemote, portRemote);
@@ -513,24 +503,24 @@ async function websocketHandler(request, uuid) {
             }
 
             const bufferChunk = new Uint8Array(chunk);
-            let protocol = await detectProtocol(bufferChunk);
+            let protocol = await detectProtocol(bufferChunk, uuid);
             let protocolHeader;
-
-            if (protocol === PROTOCOLS.P4 && !(await isVMess(bufferChunk, uuid))) {
-                protocol = PROTOCOLS.P3; // Fallback ke Shadowsocks jika gagal dekripsi VMess
-            }
 
             if (protocol === PROTOCOLS.P1) protocolHeader = parseP1Header(bufferChunk);
             else if (protocol === PROTOCOLS.P2) protocolHeader = parseP2Header(bufferChunk);
             else if (protocol === PROTOCOLS.P4) protocolHeader = await parseP4Header(bufferChunk, uuid);
             else protocolHeader = parseP3Header(bufferChunk);
 
-            if (protocolHeader.hasError) throw new Error(protocolHeader.message);
+            if (protocolHeader.hasError) {
+                throw new Error(protocolHeader.message);
+            }
 
             handleTCPOutbound(remoteSocketWrapper, protocolHeader.addressRemote, protocolHeader.portRemote,
                 protocolHeader.rawClientData, webSocket, protocolHeader.version);
         },
-    })).catch(() => {});
+    })).catch(() => {
+        safeCloseWebSocket(webSocket);
+    });
 
     return new Response(null, { status: 101, webSocket: client });
 }
