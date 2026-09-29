@@ -3,6 +3,50 @@ import md5 from 'md5';
 import { kdf, sha256 } from '../utils/hash.js';
 import { KDFSALT, parseAddr, parsePort } from '../utils/common.js';
 
+const WS_READY_STATE_OPEN = 1;
+const WS_READY_STATE_CLOSING = 2;
+
+function safeCloseWebSocket(socket) {
+    try {
+        if (socket.readyState === WS_READY_STATE_OPEN || socket.readyState === WS_READY_STATE_CLOSING) {
+            socket.close();
+        }
+    } catch (error) {}
+}
+
+// Mengadaptasi logika pengaliran data yang tahan putus dari geo-mod
+async function remoteSocketToWS(remoteSocket, webSocket, responseHeader, retry) {
+    let header = responseHeader;
+    let hasIncomingData = false;
+    
+    await remoteSocket.readable.pipeTo(
+        new WritableStream({
+            start() {},
+            async write(chunk, controller) {
+                hasIncomingData = true;
+                if (webSocket.readyState !== WS_READY_STATE_OPEN) {
+                    controller.error("webSocket is not open");
+                }
+                if (header) {
+                    // Header balasan digabung dengan chunk pertama agar stabil
+                    webSocket.send(await new Blob([header, chunk]).arrayBuffer());
+                    header = null;
+                } else {
+                    webSocket.send(chunk);
+                }
+            },
+            close() {},
+            abort() {},
+        })
+    ).catch(() => {
+        safeCloseWebSocket(webSocket);
+    });
+
+    if (hasIncomingData === false && retry) {
+        retry();
+    }
+}
+
 export async function handleVmess(server, buffer, uuidStr, wsReadable, proxyHost, proxyPort) {
     try {
         if (buffer.length < 42) throw new Error("Packet too short for VMess AEAD");
@@ -64,72 +108,88 @@ export async function handleVmess(server, buffer, uuidStr, wsReadable, proxyHost
         const addrRes = parseAddr(headerPayload, pCursor);
         const address = addrRes.address;
 
-        // --- TAMBAHAN KRUSIAL: Kirim Response Header VMess (Meniru vmess.rs)[span_4](start_span)[span_4](end_span) ---
+        // --- TAMBAHAN KRUSIAL: Enkripsi Response Header VMess ---
         const derivedKey = (await sha256(key)).subarray(0, 16);
         const derivedIv = (await sha256(iv)).subarray(0, 16);
 
         const respLenKey = (await kdf(derivedKey, [KDFSALT.AEAD_RESP_HEADER_LEN_KEY])).subarray(0, 16);
         const respLenIv = (await kdf(derivedIv, [KDFSALT.AEAD_RESP_HEADER_LEN_IV])).subarray(0, 12);
         
-        // Enkripsi panjang respons (4 bytes)[span_5](start_span)[span_5](end_span)
+        // Enkripsi panjang respons (4 bytes)
         const encryptedLength = await aesGcmEncrypt(respLenKey, respLenIv, new Uint8Array([0, 0, 0, 4]));
 
         const respKey = (await kdf(derivedKey, [KDFSALT.AEAD_RESP_HEADER_KEY])).subarray(0, 16);
         const respIv = (await kdf(derivedIv, [KDFSALT.AEAD_RESP_HEADER_IV])).subarray(0, 12);
         
-        // Enkripsi isi header respons[span_6](start_span)[span_6](end_span)
+        // Enkripsi isi header respons
         const headerData = new Uint8Array([options[0], 0, 0, 0]);
         const encryptedHeader = await aesGcmEncrypt(respKey, respIv, headerData);
 
-        // Gabungkan dan kirim ke klien via WebSocket sebelum data TCP jalan
-        if (server.readyState === 1) {
-            const responseHeaderBuf = new Uint8Array(encryptedLength.length + encryptedHeader.length);
-            responseHeaderBuf.set(encryptedLength, 0);
-            responseHeaderBuf.set(encryptedHeader, encryptedLength.length);
-            server.send(responseHeaderBuf);
-        }
-        // -----------------------------------------------------------------------------
+        // Gabungkan ke dalam satu buffer, JANGAN langsung dikirim ke WebSocket!
+        // Serahkan pada remoteSocketToWS untuk digabung dengan balasan server internet.
+        const responseHeaderBuf = new Uint8Array(encryptedLength.length + encryptedHeader.length);
+        responseHeaderBuf.set(encryptedLength, 0);
+        responseHeaderBuf.set(encryptedHeader, encryptedLength.length);
 
         const rawData = buffer.subarray(cursor);
-        const targetHost = proxyHost || address;
-        const targetPort = proxyPort || port;
 
         if (isTcp) {
-            const remoteSocket = connect({ hostname: targetHost, port: targetPort });
-            const writer = remoteSocket.writable.getWriter();
+            let remoteSocketWrapper = { value: null };
 
-            if (rawData.length > 0) {
-                await writer.write(rawData);
+            // Fungsi penjalin koneksi
+            async function connectAndWrite(targetHost, targetPort) {
+                if (!targetHost || !targetPort) throw new Error("Invalid target");
+                const tcpSocket = connect({ hostname: targetHost, port: targetPort });
+                remoteSocketWrapper.value = tcpSocket;
+                
+                const writer = tcpSocket.writable.getWriter();
+                if (rawData.length > 0) {
+                    await writer.write(rawData);
+                }
+                writer.releaseLock();
+                
+                return tcpSocket;
             }
-            writer.releaseLock();
 
+            // Fungsi fallback
+            async function retryFallback() {
+                try {
+                    const tcpSocket = await connectAndWrite(proxyHost, proxyPort);
+                    tcpSocket.closed.catch(() => {}).finally(() => safeCloseWebSocket(server));
+                    remoteSocketToWS(tcpSocket, server, responseHeaderBuf, null);
+                } catch (e) {
+                    safeCloseWebSocket(server);
+                }
+            }
+
+            try {
+                // Percobaan koneksi pertama ke alamat asli klien
+                const tcpSocket = await connectAndWrite(address, port);
+                remoteSocketToWS(tcpSocket, server, responseHeaderBuf, retryFallback);
+            } catch (e) {
+                // Jika koneksi langsung ditolak, pindah ke fallback
+                retryFallback();
+            }
+
+            // Pemipaan data dengan wrapper agar stabil dan tidak bocor memori
             wsReadable.pipeTo(new WritableStream({
                 async write(chunk) {
-                    const w = remoteSocket.writable.getWriter();
-                    await w.write(chunk);
-                    w.releaseLock();
-                },
-                abort(err) {
-                    try { remoteSocket.close(); } catch {}
-                }
-            })).catch(() => {});
-
-            remoteSocket.readable.pipeTo(new WritableStream({
-                write(data) {
-                    if (server.readyState === 1) {
-                        try {
-                            server.send(data);
-                        } catch (e) {}
+                    if (remoteSocketWrapper.value) {
+                        const writer = remoteSocketWrapper.value.writable.getWriter();
+                        await writer.write(chunk);
+                        writer.releaseLock();
                     }
-                }
+                },
+                close() {}, abort() {}
             })).catch(() => {});
+            
         } else {
-            if (server.readyState === 1) {
+            if (server.readyState === WS_READY_STATE_OPEN) {
                 server.close(1003, "UDP over VMess not supported yet");
             }
         }
     } catch (err) {
-        if (server.readyState === 1) {
+        if (server.readyState === WS_READY_STATE_OPEN) {
             server.close(1011, `VMess Parsing Error: ${err.message}`);
         }
     }
