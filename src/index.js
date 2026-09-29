@@ -1,4 +1,4 @@
-import { sniffAndRoute } from './conn.js';
+import { sniffAndRoute } from './utils/conn.js';
 
 const PROXYIP_PATTERN = /^.+-\d+$/;
 const PROXYKV_PATTERN = /^([A-Z]{2})/;
@@ -115,7 +115,6 @@ function handleWebSocket(request, proxyHost, proxyPort, uuid) {
 
     let readableStreamCancel = false;
     
-    // Pembuatan Stream yang lebih bersih dan menangkap Early Data
     const wsReadable = new ReadableStream({
         start(controller) {
             webSocket.addEventListener('message', (event) => {
@@ -133,7 +132,6 @@ function handleWebSocket(request, proxyHost, proxyPort, uuid) {
                 if (!readableStreamCancel) controller.error(err);
             });
 
-            // Tangkap Early Data dari Header (Sangat krusial untuk Xray/V2Ray)
             const earlyDataHeader = request.headers.get("sec-websocket-protocol") || "";
             if (earlyDataHeader) {
                 try {
@@ -153,14 +151,11 @@ function handleWebSocket(request, proxyHost, proxyPort, uuid) {
 
     (async () => {
         try {
-            // Membaca chunk data pertama untuk di-sniff
             const { value: initialChunk, done } = await reader.read();
             if (done || !initialChunk) return;
 
-            // Lepaskan kunci reader agar stream bisa di-pipe (pipeTo) secara bebas di dalam handler protokol
             reader.releaseLock();
 
-            // Serahkan ke polisi lalu lintas (conn.js) untuk menentukan protokol
             await sniffAndRoute(webSocket, wsReadable, initialChunk, uuid, proxyHost, proxyPort);
 
         } catch (err) {
