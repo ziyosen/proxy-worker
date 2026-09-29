@@ -1,6 +1,6 @@
-import { handleVless } from './vless.js';
-import { handleTrojan } from './trojan.js';
-import { handleVmess } from './vmess.js';
+import { handleVless } from '../protocols/vless.js';
+import { handleTrojan } from '../protocols/trojan.js';
+import { handleVmess } from '../protocols/vmess.js';
 
 export async function sniffAndRoute(server, wsReadable, initialChunk, uuid, proxyHost, proxyPort) {
     
@@ -57,6 +57,5 @@ function isShadowsocks(buffer) {
 }
 
 function isVmess(buffer) {
-    
     return buffer.length > 0;
 }
