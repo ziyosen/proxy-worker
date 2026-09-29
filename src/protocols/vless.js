@@ -1,6 +1,50 @@
 import { connect } from 'cloudflare:sockets';
 import { parseAddr, parsePort } from '../utils/common.js';
 
+const WS_READY_STATE_OPEN = 1;
+const WS_READY_STATE_CLOSING = 2;
+
+function safeCloseWebSocket(socket) {
+    try {
+        if (socket.readyState === WS_READY_STATE_OPEN || socket.readyState === WS_READY_STATE_CLOSING) {
+            socket.close();
+        }
+    } catch (error) {}
+}
+
+async function remoteSocketToWS(remoteSocket, webSocket, responseHeader, retry) {
+    let header = responseHeader;
+    let hasIncomingData = false;
+    
+    await remoteSocket.readable.pipeTo(
+        new WritableStream({
+            start() {},
+            async write(chunk, controller) {
+                hasIncomingData = true;
+                if (webSocket.readyState !== WS_READY_STATE_OPEN) {
+                    controller.error("webSocket is not open");
+                }
+                if (header) {
+                    // Gabungkan header 2 byte dengan chunk pertama agar aman
+                    webSocket.send(await new Blob([header, chunk]).arrayBuffer());
+                    header = null;
+                } else {
+                    webSocket.send(chunk);
+                }
+            },
+            close() {},
+            abort() {},
+        })
+    ).catch(() => {
+        safeCloseWebSocket(webSocket);
+    });
+
+    // Jika tidak ada data masuk, picu fungsi retry ke proxy cadangan
+    if (hasIncomingData === false && retry) {
+        retry();
+    }
+}
+
 export async function handleVless(server, buffer, wsReadable, proxyHost, proxyPort) {
     try {
         let cursor = 0;
@@ -32,84 +76,63 @@ export async function handleVless(server, buffer, wsReadable, proxyHost, proxyPo
         const rawData = buffer.subarray(cursor);
 
         if (isTcp) {
-            // Terapkan addr_pool persis seperti di vless.rs: utamakan tujuan asli, lalu fallback ke proxy IP worker
-            const addrPool = [
-                { host: clientAddr, port: clientPort },
-                { host: proxyHost, port: proxyPort }
-            ];
+            const responseHeader = new Uint8Array([0, 0]);
+            let remoteSocketWrapper = { value: null };
 
-            let remoteSocket = null;
-            let connected = false;
+            // Fungsi pembuka soket (meniru handleTCPOutBound)
+            async function connectAndWrite(address, port) {
+                if (!address || !port) throw new Error("Invalid target");
+                const tcpSocket = connect({ hostname: address, port: port });
+                remoteSocketWrapper.value = tcpSocket;
+                
+                const writer = tcpSocket.writable.getWriter();
+                if (rawData.length > 0) {
+                    await writer.write(rawData);
+                }
+                writer.releaseLock();
+                
+                return tcpSocket;
+            }
 
-            // Coba sambungkan secara berurutan sesuai pool
-            for (const target of addrPool) {
+            // Fungsi fallback ke proxy worker jika target pertama gagal
+            async function retryFallback() {
                 try {
-                    if (!target.host || !target.port) continue;
-                    const socket = connect({ hostname: target.host, port: target.port });
-                    // Tes buka writer untuk memastikan socket benar-benar merespons
-                    await socket.opened;
-                    remoteSocket = socket;
-                    connected = true;
-                    break;
+                    const tcpSocket = await connectAndWrite(proxyHost, proxyPort);
+                    tcpSocket.closed.catch(() => {}).finally(() => safeCloseWebSocket(server));
+                    remoteSocketToWS(tcpSocket, server, responseHeader, null);
                 } catch (e) {
-                    // Lanjut ke target berikutnya di addr_pool jika gagal
+                    safeCloseWebSocket(server);
                 }
             }
 
-            if (!connected || !remoteSocket) {
-                throw new Error("All TCP outbound connections failed");
+            try {
+                // Percobaan pertama ke alamat asli klien
+                const tcpSocket = await connectAndWrite(clientAddr, clientPort);
+                remoteSocketToWS(tcpSocket, server, responseHeader, retryFallback);
+            } catch (e) {
+                // Jika langsung error, lempar ke proxy cadangan
+                retryFallback();
             }
 
-            const writer = remoteSocket.writable.getWriter();
-
-            // Kirim balasan header VLESS ke klien (2 byte kosong [0, 0])
-            if (server.readyState === 1) {
-                server.send(new Uint8Array([0, 0]));
-            }
-
-            if (rawData.length > 0) {
-                await writer.write(rawData);
-            }
-
-            // Alirkan data dari WebSocket ke TCP remote secara aman
-            (async () => {
-                try {
-                    const reader = wsReadable.getReader();
-                    while (true) {
-                        const { value, done } = await reader.read();
-                        if (done) break;
-                        if (value) {
-                            await writer.write(value);
-                        }
+            // Alirkan data dari WebSocket ke TCP remote menggunakan pipeTo agar tidak memory leak
+            wsReadable.pipeTo(new WritableStream({
+                async write(chunk) {
+                    if (remoteSocketWrapper.value) {
+                        const writer = remoteSocketWrapper.value.writable.getWriter();
+                        await writer.write(chunk);
+                        writer.releaseLock();
                     }
-                } catch (e) {
-                } finally {
-                    try { writer.releaseLock(); } catch {}
-                }
-            })();
-
-            // Alirkan data balik dari TCP remote ke WebSocket menggunakan getReader()
-            (async () => {
-                try {
-                    const readerRemote = remoteSocket.readable.getReader();
-                    while (true) {
-                        const { value, done } = await readerRemote.read();
-                        if (done) break;
-                        if (value && server.readyState === 1) {
-                            server.send(value);
-                        }
-                    }
-                } catch (e) {
-                }
-            })();
+                },
+                close() {}, abort() {}
+            })).catch(() => {});
 
         } else {
-            if (server.readyState === 1) {
+            if (server.readyState === WS_READY_STATE_OPEN) {
                 server.close(1003, "UDP over VLESS not supported yet");
             }
         }
     } catch (err) {
-        if (server.readyState === 1) {
+        if (server.readyState === WS_READY_STATE_OPEN) {
             server.close(1011, "VLESS Parsing Error");
         }
     }
