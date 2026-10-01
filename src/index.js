@@ -1,12 +1,15 @@
 
 // ============================================
-// VPN CONFIG MANAGER & MULTI-PROTOCOL WORKER 
+// VPN CONFIG MANAGER & MULTI-PROTOCOL WORKER (VMESS AEAD + LOCKED PATH + BROWSING)
 // ============================================
 
 import { connect } from "cloudflare:sockets";
 
 let serviceName = "";
 let APP_DOMAIN = "";
+// prxIP tidak lagi dipakai sebagai state global (menghindari race antar-request).
+// Nilai proxy sekarang diteruskan sebagai parameter fungsi.
+
 const KV_PRX_URL = "https://raw.githubusercontent.com/ziyosen/tunel-worker/refs/heads/main/proxy.json";
 const DNS_SERVER_ADDRESS = "8.8.8.8";
 const DNS_SERVER_PORT = 53;
@@ -291,7 +294,7 @@ async function getProxyFromPath(pathname) {
     
     // Safety fallback jika fetch gagal
     if (!proxyKv || Object.keys(proxyKv).length === 0) {
-        return "104.18.7.81:443"; // Default fallback IP
+        return "138.2.74.219:28616"; // Default fallback IP
     }
 
     // Menggunakan Math.random agar lebih aman dari crypto.getRandomValues bias
@@ -316,7 +319,7 @@ async function getProxyFromPath(pathname) {
     return ipPortMatch[1] + ':' + ipPortMatch[2];
   }
   
-  return "104.18.7.81:443"; // Fallback akhir jika pattern tidak cocok
+  return "138.2.74.219:28616"; // Fallback akhir jika pattern tidak cocok
 }
 
 export default {
@@ -336,7 +339,7 @@ export default {
         const resolvedProxy = await getProxyFromPath(url.pathname);
         const prx = resolvedProxy
           ? resolvedProxy.replace(/:/g, "-")
-          : "104.18.7.81:443"; // Fallback aman
+          : "138.2.74.219:28616"; // Fallback aman
 
         return await websocketHandler(request, uuid, prx);
       }
@@ -451,7 +454,8 @@ async function handleTCPOutBound(remoteSocket, addressRemote, portRemote, rawCli
   }
 
   async function retry() {
-    
+    // Dibungkus try/catch: kegagalan koneksi ke proxy cadangan tidak boleh
+    // menjadi exception yang tak tertangani (sumber 1101).
     try {
       const targetHost = prx ? prx.split(/[:=-]/)[0] : addressRemote;
       const targetPort = prx ? parseInt(prx.split(/[:=-]/)[1]) : portRemote;
