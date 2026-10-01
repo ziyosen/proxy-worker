@@ -1,13 +1,12 @@
+
 // ============================================
-// VPN CONFIG MANAGER & MULTI-PROTOCOL WORKER (VMESS AEAD + LOCKED PATH + BROWSING)
+// VPN CONFIG MANAGER & MULTI-PROTOCOL WORKER 
 // ============================================
 
 import { connect } from "cloudflare:sockets";
 
 let serviceName = "";
 let APP_DOMAIN = "";
-let prxIP = "";
-
 const KV_PRX_URL = "https://raw.githubusercontent.com/ziyosen/tunel-worker/refs/heads/main/proxy.json";
 const DNS_SERVER_ADDRESS = "8.8.8.8";
 const DNS_SERVER_PORT = 53;
@@ -335,13 +334,11 @@ export default {
         }
 
         const resolvedProxy = await getProxyFromPath(url.pathname);
-        if (resolvedProxy) {
-          prxIP = resolvedProxy.replace(/:/g, "-");
-        } else {
-          prxIP = "104.18.7.81:443"; // Fallback aman
-        }
+        const prx = resolvedProxy
+          ? resolvedProxy.replace(/:/g, "-")
+          : "104.18.7.81:443"; // Fallback aman
 
-        return await websocketHandler(request, uuid);
+        return await websocketHandler(request, uuid, prx);
       }
 
       return new Response("hi from wasm!", { status: 200, headers: CORS_HEADER_OPTIONS });
@@ -354,7 +351,7 @@ export default {
   },
 };
 
-async function websocketHandler(request, uuid) {
+async function websocketHandler(request, uuid, prx) {
   const webSocketPair = new WebSocketPair();
   const [client, webSocket] = Object.values(webSocketPair);
 
@@ -375,46 +372,61 @@ async function websocketHandler(request, uuid) {
     .pipeTo(
       new WritableStream({
         async write(chunk, controller) {
-          if (isDNS) {
-            return handleUDPOutbound(DNS_SERVER_ADDRESS, DNS_SERVER_PORT, chunk, webSocket, null, log, RELAY_SERVER_UDP);
-          }
-          if (remoteSocketWrapper.value) {
-            const writer = remoteSocketWrapper.value.writable.getWriter();
-            await writer.write(chunk);
-            writer.releaseLock();
-            return;
-          }
-
-          const bufferChunk = new Uint8Array(chunk);
-          const protocol = await detectProtocol(bufferChunk, uuid);
-          let protocolHeader;
-
-          if (protocol === PROTOCOLS.P1) {
-            protocolHeader = readHorseHeader(bufferChunk);
-          } else if (protocol === PROTOCOLS.P2) {
-            protocolHeader = readP2Header(bufferChunk);
-          } else if (protocol === PROTOCOLS.P4) {
-            protocolHeader = await parseP4Header(bufferChunk, uuid);
-          } else {
-            protocolHeader = readSsHeader(bufferChunk);
-          }
-
-          addressLog = protocolHeader.addressRemote;
-          portLog = `${protocolHeader.portRemote} -> ${protocolHeader.isUDP ? "UDP" : "TCP"}`;
-
-          if (protocolHeader.hasError) {
-            throw new Error(protocolHeader.message);
-          }
-
-          if (protocolHeader.isUDP) {
-            if (protocolHeader.portRemote === 53) {
-              isDNS = true;
-              return handleUDPOutbound(DNS_SERVER_ADDRESS, DNS_SERVER_PORT, chunk, webSocket, protocolHeader.version, log, RELAY_SERVER_UDP);
+          // Seluruh isi handler dibungkus try/catch: setelah response 101 dikirim,
+          // exception apa pun yang lolos dari sini tidak lagi tertangkap oleh try/catch
+          // di handler fetch() dan akan tampil sebagai Error 1101. Dengan dibungkus,
+          // kesalahan cukup menutup soket dengan rapi.
+          try {
+            if (isDNS) {
+              return await handleUDPOutbound(DNS_SERVER_ADDRESS, DNS_SERVER_PORT, chunk, webSocket, null, log, RELAY_SERVER_UDP);
             }
-            return handleUDPOutbound(protocolHeader.addressRemote, protocolHeader.portRemote, chunk, webSocket, protocolHeader.version, log, RELAY_SERVER_UDP);
-          }
+            if (remoteSocketWrapper.value) {
+              const writer = remoteSocketWrapper.value.writable.getWriter();
+              try {
+                await writer.write(chunk);
+              } finally {
+                writer.releaseLock();
+              }
+              return;
+            }
 
-          handleTCPOutBound(remoteSocketWrapper, protocolHeader.addressRemote, protocolHeader.portRemote, protocolHeader.rawClientData, webSocket, protocolHeader.version, log);
+            const bufferChunk = new Uint8Array(chunk);
+            const protocol = await detectProtocol(bufferChunk, uuid);
+            let protocolHeader;
+
+            if (protocol === PROTOCOLS.P1) {
+              protocolHeader = readHorseHeader(bufferChunk);
+            } else if (protocol === PROTOCOLS.P2) {
+              protocolHeader = readP2Header(bufferChunk);
+            } else if (protocol === PROTOCOLS.P4) {
+              protocolHeader = await parseP4Header(bufferChunk, uuid);
+            } else {
+              protocolHeader = readSsHeader(bufferChunk);
+            }
+
+            addressLog = protocolHeader.addressRemote || "";
+            portLog = `${protocolHeader.portRemote} -> ${protocolHeader.isUDP ? "UDP" : "TCP"}`;
+
+            if (protocolHeader.hasError) {
+              // Dulu: throw new Error(...) -> memicu 1101. Sekarang cukup tutup soket.
+              log("header parse error", protocolHeader.message);
+              safeCloseWebSocket(webSocket);
+              return;
+            }
+
+            if (protocolHeader.isUDP) {
+              if (protocolHeader.portRemote === 53) {
+                isDNS = true;
+                return await handleUDPOutbound(DNS_SERVER_ADDRESS, DNS_SERVER_PORT, chunk, webSocket, protocolHeader.version, log, RELAY_SERVER_UDP);
+              }
+              return await handleUDPOutbound(protocolHeader.addressRemote, protocolHeader.portRemote, chunk, webSocket, protocolHeader.version, log, RELAY_SERVER_UDP);
+            }
+
+            await handleTCPOutBound(remoteSocketWrapper, protocolHeader.addressRemote, protocolHeader.portRemote, protocolHeader.rawClientData, webSocket, protocolHeader.version, log, prx);
+          } catch (err) {
+            log("websocket write handler error", err && err.message ? err.message : err);
+            safeCloseWebSocket(webSocket);
+          }
         },
       })
     )
@@ -425,28 +437,44 @@ async function websocketHandler(request, uuid) {
   return new Response(null, { status: 101, webSocket: client });
 }
 
-async function handleTCPOutBound(remoteSocket, addressRemote, portRemote, rawClientData, webSocket, responseHeader, log) {
+async function handleTCPOutBound(remoteSocket, addressRemote, portRemote, rawClientData, webSocket, responseHeader, log, prx) {
   async function connectAndWrite(address, port) {
     const tcpSocket = connect({ hostname: address, port: port });
     remoteSocket.value = tcpSocket;
     const writer = tcpSocket.writable.getWriter();
-    await writer.write(rawClientData);
-    writer.releaseLock();
+    try {
+      await writer.write(rawClientData);
+    } finally {
+      writer.releaseLock();
+    }
     return tcpSocket;
   }
 
   async function retry() {
-    const targetHost = prxIP ? prxIP.split(/[:=-]/)[0] : addressRemote;
-    const targetPort = prxIP ? parseInt(prxIP.split(/[:=-]/)[1]) : portRemote;
-    const tcpSocket = await connectAndWrite(targetHost, targetPort);
-    tcpSocket.closed.catch(() => {}).finally(() => safeCloseWebSocket(webSocket));
-    remoteSocketToWS(tcpSocket, webSocket, responseHeader, null, log);
+    
+    try {
+      const targetHost = prx ? prx.split(/[:=-]/)[0] : addressRemote;
+      const targetPort = prx ? parseInt(prx.split(/[:=-]/)[1]) : portRemote;
+      const tcpSocket = await connectAndWrite(targetHost, targetPort);
+      tcpSocket.closed.catch(() => {}).finally(() => safeCloseWebSocket(webSocket));
+      remoteSocketToWS(tcpSocket, webSocket, responseHeader, null, log).catch((err) => {
+        log("retry stream error", err && err.message ? err.message : err);
+        safeCloseWebSocket(webSocket);
+      });
+    } catch (e) {
+      log("retry to fallback proxy failed", e && e.message ? e.message : e);
+      safeCloseWebSocket(webSocket);
+    }
   }
 
   try {
     const tcpSocket = await connectAndWrite(addressRemote, portRemote);
-    remoteSocketToWS(tcpSocket, webSocket, responseHeader, retry, log);
+    remoteSocketToWS(tcpSocket, webSocket, responseHeader, retry, log).catch((err) => {
+      log("target stream error", err && err.message ? err.message : err);
+      safeCloseWebSocket(webSocket);
+    });
   } catch (e) {
+    log("connect to target failed, trying fallback", e && e.message ? e.message : e);
     retry();
   }
 }
