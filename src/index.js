@@ -368,6 +368,18 @@ async function websocketHandler(request, uuid, prx) {
   const earlyDataHeader = request.headers.get("sec-websocket-protocol") || "";
   const readableWebSocketStream = makeReadableWebSocketStream(webSocket, earlyDataHeader, log);
 
+  // Keepalive: Cloudflare memutus WebSocket yang idle (tanpa frame) cukup lama,
+  // yang mematikan sesi panjang. Kirim protocol-level ping tiap 25 detik agar
+  // koneksi tetap dianggap hidup oleh edge Cloudflare.
+  const keepaliveTimer = setInterval(() => {
+    try {
+      if (webSocket.readyState === WS_READY_STATE_OPEN) webSocket.send(null, { kind: "ping" });
+    } catch (_) {}
+  }, 25000);
+  const stopKeepalive = () => { clearInterval(keepaliveTimer); };
+  webSocket.addEventListener("close", stopKeepalive);
+  webSocket.addEventListener("error", stopKeepalive);
+
   let remoteSocketWrapper = { value: null };
   let isDNS = false;
 
@@ -442,11 +454,20 @@ async function websocketHandler(request, uuid, prx) {
 
 async function handleTCPOutBound(remoteSocket, addressRemote, portRemote, rawClientData, webSocket, responseHeader, log, prx) {
   async function connectAndWrite(address, port) {
+    // Anti-hang: connect + write pertama dibatasi 8 detik. Target yang tidak
+    // merespons tidak lagi membuat koneksi menunggu selamanya.
+    const TIMEOUT_MS = 8000;
     const tcpSocket = connect({ hostname: address, port: port, allowH2: false });
     remoteSocket.value = tcpSocket;
     const writer = tcpSocket.writable.getWriter();
+    const timeout = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("connect+write timeout (8s)")), TIMEOUT_MS)
+    );
     try {
-      await writer.write(rawClientData);
+      await Promise.race([writer.write(rawClientData), timeout]);
+    } catch (e) {
+      try { tcpSocket.close(); } catch (_) {}
+      throw e;
     } finally {
       writer.releaseLock();
     }
@@ -495,9 +516,19 @@ async function handleUDPOutbound(targetAddress, targetPort, dataChunk, webSocket
     relayMessage.set(separator, headerBuffer.length);
     relayMessage.set(new Uint8Array(dataChunk), headerBuffer.length + separator.length);
 
+    // Anti-hang: relay connect+write juga dibatasi 8 detik.
     const writer = tcpSocket.writable.getWriter();
-    await writer.write(relayMessage);
-    writer.releaseLock();
+    const relayTimeout = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("udp relay connect+write timeout (8s)")), 8000)
+    );
+    try {
+      await Promise.race([writer.write(relayMessage), relayTimeout]);
+    } catch (e) {
+      try { tcpSocket.close(); } catch (_) {}
+      throw e;
+    } finally {
+      writer.releaseLock();
+    }
 
     await tcpSocket.readable.pipeTo(
       new WritableStream({
@@ -647,31 +678,28 @@ function readHorseHeader(buffer) {
 async function remoteSocketToWS(remoteSocket, webSocket, responseHeader, retry, log) {
   let header = responseHeader;
   let hasIncomingData = false;
-  // Anti-timeout: jika target lambat mengirim data, jangan biarkan stream hang
-  // tanpa batas — beri timeout lalu tutup rapi (bukan error 1101).
-  const timeout = new Promise((resolve) => setTimeout(() => resolve("timeout"), 15000));
+  // Catatan: timeout 15s lama dihapus — ia hanya "menang" race lalu membiarkan
+  // stream tetap berjalan (tidak menutup apa pun). Idle connection kini dijaga
+  // oleh keepalive ping WS (25s), bukan dipaksa mati.
   try {
-    await Promise.race([
-      remoteSocket.readable
-        .pipeTo(
-          new WritableStream({
-            async write(chunk, controller) {
-              hasIncomingData = true;
-              if (webSocket.readyState !== WS_READY_STATE_OPEN) controller.error("closed");
-              if (header) {
-                webSocket.send(await new Blob([header, chunk]).arrayBuffer());
-                header = null;
-              } else {
-                webSocket.send(chunk);
-              }
-            },
-          })
-        )
-        .catch(() => {
-          safeCloseWebSocket(webSocket);
-        }),
-      timeout,
-    ]);
+    await remoteSocket.readable
+      .pipeTo(
+        new WritableStream({
+          async write(chunk, controller) {
+            hasIncomingData = true;
+            if (webSocket.readyState !== WS_READY_STATE_OPEN) controller.error("closed");
+            if (header) {
+              webSocket.send(await new Blob([header, chunk]).arrayBuffer());
+              header = null;
+            } else {
+              webSocket.send(chunk);
+            }
+          },
+        })
+      )
+      .catch(() => {
+        safeCloseWebSocket(webSocket);
+      });
   } catch (e) {}
   if (hasIncomingData === false && retry) retry();
 }
