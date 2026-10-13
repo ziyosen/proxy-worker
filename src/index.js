@@ -442,7 +442,7 @@ async function websocketHandler(request, uuid, prx) {
 
 async function handleTCPOutBound(remoteSocket, addressRemote, portRemote, rawClientData, webSocket, responseHeader, log, prx) {
   async function connectAndWrite(address, port) {
-    const tcpSocket = connect({ hostname: address, port: port });
+    const tcpSocket = connect({ hostname: address, port: port, allowH2: false });
     remoteSocket.value = tcpSocket;
     const writer = tcpSocket.writable.getWriter();
     try {
@@ -647,24 +647,32 @@ function readHorseHeader(buffer) {
 async function remoteSocketToWS(remoteSocket, webSocket, responseHeader, retry, log) {
   let header = responseHeader;
   let hasIncomingData = false;
-  await remoteSocket.readable
-    .pipeTo(
-      new WritableStream({
-        async write(chunk, controller) {
-          hasIncomingData = true;
-          if (webSocket.readyState !== WS_READY_STATE_OPEN) controller.error("closed");
-          if (header) {
-            webSocket.send(await new Blob([header, chunk]).arrayBuffer());
-            header = null;
-          } else {
-            webSocket.send(chunk);
-          }
-        },
-      })
-    )
-    .catch(() => {
-      safeCloseWebSocket(webSocket);
-    });
+  // Anti-timeout: jika target lambat mengirim data, jangan biarkan stream hang
+  // tanpa batas — beri timeout lalu tutup rapi (bukan error 1101).
+  const timeout = new Promise((resolve) => setTimeout(() => resolve("timeout"), 15000));
+  try {
+    await Promise.race([
+      remoteSocket.readable
+        .pipeTo(
+          new WritableStream({
+            async write(chunk, controller) {
+              hasIncomingData = true;
+              if (webSocket.readyState !== WS_READY_STATE_OPEN) controller.error("closed");
+              if (header) {
+                webSocket.send(await new Blob([header, chunk]).arrayBuffer());
+                header = null;
+              } else {
+                webSocket.send(chunk);
+              }
+            },
+          })
+        )
+        .catch(() => {
+          safeCloseWebSocket(webSocket);
+        }),
+      timeout,
+    ]);
+  } catch (e) {}
   if (hasIncomingData === false && retry) retry();
 }
 
