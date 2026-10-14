@@ -1,0 +1,23 @@
+name: Tail v2ray diagnostics
+on:
+  workflow_dispatch:
+jobs:
+  tail:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ea1aab81dc8e22018131832d124a54fc
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install wrangler
+        run: npm i wrangler@3.90.0
+      - name: Tail while hitting worker
+        run: |
+          npx wrangler tail v2ray --format pretty > tail.log 2>&1 &
+          TAILPID=$!
+          sleep 10
+          curl -s -o /dev/null -w "self-curl: %{http_code}\n" https://v2ray.benxx.workers.dev/ || true
+          curl -s -o /dev/null -w "self-curl2: %{http_code}\n" "https://v2ray.benxx.workers.dev/sub" || true
+          sleep 15
+          kill $TAILPID || true
+          cat tail.log
