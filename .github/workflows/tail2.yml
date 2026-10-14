@@ -1,0 +1,20 @@
+name: Tail benxx-gw
+on:
+  workflow_dispatch:
+jobs:
+  tail2:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ea1aab81dc8e22018131832d124a54fc
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install wrangler
+        run: npm i wrangler@3.90.0
+      - name: Tail while hitting worker
+        run: |
+          (npx wrangler tail benxx-gw --format json > tail.log 2>&1 &)
+          sleep 12
+          curl -s -o /dev/null -w "hit: %{http_code}\n" https://benxx-gw.benxx.workers.dev/ || true
+          sleep 20
+          cat tail.log
