@@ -186,12 +186,12 @@ function sniffProtocol(buffer) {
     const addressType = new Uint8Array(buffer.slice(portIndex + 2, portIndex + 3))[0];
     let addrLen = -1;
     if (addressType === 1) addrLen = 4;
-    else if (addressType === 3) addrLen = new Uint8Array(buffer.slice(portIndex + 3, portIndex + 4))[0];
-    else if (addressType === 4) addrLen = 16;
+    else if (addressType === 2) addrLen = new Uint8Array(buffer.slice(portIndex + 3, portIndex + 4))[0];
+    else if (addressType === 3) addrLen = 16;
     if (addrLen >= 0) {
-      const crlfPos = portIndex + 3 + addrLen;
+      const crlfPos = portIndex + 4 + addrLen; // +1 = byte panjang domain
       const d = new Uint8Array(buffer.slice(crlfPos, crlfPos + 4));
-      if (d[0] === 0x0d && d[1] === 0x0a && (d[2] === 0x01 || d[2] === 0x03 || d[2] === 0x7f) && (d[3] === 0x01 || d[3] === 0x03 || d[3] === 0x04)) {
+      if (d[0] === 0x0d && d[1] === 0x0a) {
         return "vless";
       }
     }
