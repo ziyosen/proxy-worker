@@ -11,7 +11,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install wrangler
         run: npm i wrangler@3.90.0
-      - name: Disable workers.dev
-        run: npx wrangler deploy --workers-dev false || true
-      - name: Re-enable workers.dev
-        run: npx wrangler deploy --workers-dev true
+      - name: Deploy with workers_dev=false
+        run: sed -i 's/workers_dev = true/workers_dev = false/' wrangler.toml && npx wrangler deploy
+      - name: Deploy with workers_dev=true
+        run: sed -i 's/workers_dev = false/workers_dev = true/' wrangler.toml && npx wrangler deploy
