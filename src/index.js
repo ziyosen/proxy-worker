@@ -190,7 +190,7 @@ function sniffProtocol(buffer) {
     else if (addressType === 2) addrLen = new Uint8Array(buffer.slice(portIndex + 3, portIndex + 4))[0];
     else if (addressType === 3) addrLen = 16;
     if (addrLen >= 0) {
-      const crlfPos = portIndex + 4 + addrLen; // +1 = byte panjang domain
+      const crlfPos = portIndex + 3 + addrLen + (addressType === 2 ? 1 : 0); // +1 jika domain (byte panjang)
       const d = new Uint8Array(buffer.slice(crlfPos, crlfPos + 4));
       if (d[0] === 0x0d && d[1] === 0x0a) {
         return "vless";
