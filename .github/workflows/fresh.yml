@@ -17,4 +17,6 @@ jobs:
       - name: Install wrangler
         run: npm i wrangler@4
       - name: Deploy gateway
-        run: sed "s/name = \"v2ray\"/name = \"${{ inputs.name }}\"/" wrangler.toml > /tmp/fresh.toml && npx wrangler deploy -c /tmp/fresh.toml
+        run: |
+          sed "s/name = \"v2ray\"/name = \"${{ inputs.name }}\"/; s|main = \"src/index.js\"|main = \"$GITHUB_WORKSPACE/src/index.js\"|" wrangler.toml > /tmp/fresh.toml
+          npx wrangler deploy -c /tmp/fresh.toml
