@@ -118,7 +118,7 @@ function readVLESSHeader(buffer, allowedUUIDs) {
     hasError: false,
     addressRemote: addressValue,
     portRemote,
-    rawClientData: buffer.slice(addressValueIndex + addressLength + 2), // +2 = CRLF
+    rawClientData: buffer.slice(addressValueIndex + addressLength), // +2 = CRLF
     version: new Uint8Array([version[0], 0]),
     isUDP,
   };
@@ -178,23 +178,32 @@ function readTrojanHeader(buffer, allowedUUIDs) {
 
 // Sniffer: VLESS vs Trojan — VLESS: byte 56-57 = 0x0d 0x0a; Trojan: 58 byte hash pertama hex
 function sniffProtocol(buffer) {
-  console.log("sniff len=", buffer.byteLength, "hex0-40=", arrayBufferToHex(buffer.slice(0,40)));
   if (buffer.byteLength < 24) return null;
-  // VLESS: posisi CRLF dihitung dari struktur: ver(1)+uuid(16)+optLen(1)+opt+cmd(1)+port(2)+atyp(1)+addr
+  // VLESS (xray): ver(1) uuid(16) addonLen(1) addon(N) cmd(1) port(2) atyp(1) addr(T) — tanpa CRLF
   const optLength = new Uint8Array(buffer.slice(17, 18))[0];
   const portIndex = 18 + optLength + 1;
   if (buffer.byteLength >= portIndex + 3) {
+    const cmd = new Uint8Array(buffer.slice(portIndex - 1, portIndex))[0];
     const addressType = new Uint8Array(buffer.slice(portIndex + 2, portIndex + 3))[0];
-    let addrLen = -1;
-    if (addressType === 1) addrLen = 4;
-    else if (addressType === 2) addrLen = new Uint8Array(buffer.slice(portIndex + 3, portIndex + 4))[0];
-    else if (addressType === 3) addrLen = 16;
-    if (addrLen >= 0) {
-      const crlfPos = portIndex + 3 + addrLen + (addressType === 2 ? 1 : 0); // +1 jika domain (byte panjang)
-      const d = new Uint8Array(buffer.slice(crlfPos, crlfPos + 4));
-      if (d[0] === 0x0d && d[1] === 0x0a) {
-        return "vless";
-      }
+    const cmdOk = cmd === 1 || cmd === 2 || cmd === 3;
+    const atypOk = addressType === 1 || addressType === 2 || addressType === 3;
+    if (cmdOk && atypOk) {
+      let addrLen = -1;
+      if (addressType === 1) addrLen = 4;
+      else if (addressType === 2) addrLen = new Uint8Array(buffer.slice(portIndex + 3, portIndex + 4))[0];
+      else if (addressType === 3) addrLen = 16;
+      if (addrLen > 0 && buffer.byteLength >= portIndex + 3 + addrLen) return "vless";
+    }
+  }
+  // Trojan: 56-byte hex hash + CRLF
+  if (buffer.byteLength >= 58) {
+    const hash = new Uint8Array(buffer.slice(0, 56));
+    if (/^([0-9a-f]{2}){28}$/i.test(arrayBufferToHex(hash)) &&
+        new Uint8Array(buffer.slice(56, 58))[0] === 0x0d &&
+        new Uint8Array(buffer.slice(56, 58))[1] === 0x0a) return "trojan";
+  }
+  return null;
+}
     }
   }
   // Trojan: hash hex (0-9a-f) sepanjang 56 byte + CRLF
