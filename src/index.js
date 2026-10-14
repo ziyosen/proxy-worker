@@ -137,9 +137,9 @@ function readTrojanHeader(buffer, allowedUUIDs) {
   if (cmd === 3) isUDP = true;
   else if (cmd !== 1) return { hasError: true, message: `trojan cmd ${cmd} tidak didukung` };
 
-  const portRemote = view.getUint16(cmdIndex + 1);
-  const addressType = view.getUint8(cmdIndex + 3);
-  let idx = cmdIndex + 4;
+  // Trojan standar: CMD + ATYP + ADDR + PORT(big-endian, SETELAH addr) + CRLF
+  const addressType = view.getUint8(cmdIndex + 1);
+  let idx = cmdIndex + 2;
   let addressValue = "";
   switch (addressType) {
     case 1:
@@ -164,6 +164,9 @@ function readTrojanHeader(buffer, allowedUUIDs) {
     default:
       return { hasError: true, message: `trojan addressType ${addressType} tidak valid` };
   }
+  // PORT big-endian SETELAH addr, lalu CRLF penutup
+  const portRemote = view.getUint16(idx);
+  idx += 2;
   // skip CRLF (2 byte)
   const rawStart = idx + 2;
   return {
