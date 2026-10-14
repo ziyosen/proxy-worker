@@ -19,6 +19,12 @@ bodies = {
 };
 ''',
  "full-real": src,
+ "stub": '''export default {
+  async fetch(request, env, ctx) {
+    return new Response("stub-ok");
+  }
+};
+''',
 }
 open('/tmp/halfmain.js','w').write(head + bodies[mode])
 toml = open('wrangler.toml').read().replace('name = "v2ray"', 'name = "half-gw"').replace('main = "src/index.js"', 'main = "/tmp/halfmain.js"')
