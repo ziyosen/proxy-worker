@@ -1,0 +1,20 @@
+name: Deploy fresh gateway name
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        description: 'worker name'
+        required: true
+        default: 'gw-fresh'
+jobs:
+  fresh:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ea1aab81dc8e22018131832d124a54fc
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install wrangler
+        run: npm i wrangler@4
+      - name: Deploy gateway
+        run: sed "s/name = \"v2ray\"/name = \"${{ inputs.name }}\"/" wrangler.toml > /tmp/fresh.toml && npx wrangler deploy -c /tmp/fresh.toml
