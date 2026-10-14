@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       lines:
-        description: 'keep first N lines of index.js'
+        description: 'keep first N lines'
         required: true
         default: '300'
 jobs:
@@ -16,9 +16,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install wrangler
         run: npm i wrangler@4
-      - name: Deploy truncated gateway
+      - name: Deploy truncated
         run: |
-          head -n ${{ inputs.lines }} src/index.js > /tmp/halfbody.js
-          echo 'export default { fetch() { return new Response("half-ok lines="+'$(wc -l < /tmp/halfbody.js)+'"); } };' > /tmp/halfmain.js
+          node -e "const fs=require('fs');const lines=fs.readFileSync('src/index.js','utf8').split('\n');const n=parseInt(process.argv[1]);fs.writeFileSync('/tmp/halfmain.js','export default { fetch() { return new Response(\"half-ok lines='+n+'\"); } };');" ${{ inputs.lines }}
           sed 's/name = "v2ray"/name = "half-gw"/; s|main = "src/index.js"|main = "/tmp/halfmain.js"|' wrangler.toml > /tmp/half.toml
           npx wrangler deploy -c /tmp/half.toml
