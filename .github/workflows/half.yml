@@ -1,11 +1,10 @@
-name: Half deploy
+name: Half real-code bisect
 on:
   workflow_dispatch:
     inputs:
       lines:
-        description: 'keep first N lines'
         required: true
-        default: '300'
+        default: '560'
 jobs:
   half:
     runs-on: ubuntu-latest
@@ -16,8 +15,41 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install wrangler
         run: npm i wrangler@4
-      - name: Deploy truncated
+      - name: Build and deploy truncated real code
         run: |
-          node -e "const fs=require('fs');const lines=fs.readFileSync('src/index.js','utf8').split('\n');const n=parseInt(process.argv[1]);fs.writeFileSync('/tmp/halfmain.js','export default { fetch() { return new Response(\"half-ok lines='+n+'\"); } };');" ${{ inputs.lines }}
-          sed 's/name = "v2ray"/name = "half-gw"/; s|main = "src/index.js"|main = "/tmp/halfmain.js"|' wrangler.toml > /tmp/half.toml
+          head -n ${{ inputs.lines }} src/index.js | sed 's/^export default {/export default { __disabled: true, _fetch: async () => new Response("x"), __origFetch: /' > /tmp/body.js
+          cat > /tmp/halfmain.js <<'JS'
+JS
+          cat /tmp/body.js >> /tmp/halfmain.js
+          # remove original export default block (starts at 'export default {') and append simple default
+          python3 - <<'PY'
+src = open('/tmp/halfmain.js').read()
+idx = src.find('export default {')
+open('/tmp/halfmain.js','w').write(src[:idx] + '\nexport default { async fetch(request, env, ctx) { try { return await globalThis.__origFetchRef(request, env, ctx); } catch(e) { return new Response("ERR:"+e, {status:500}); } } };\n')
+PY
+          # simpler: instead of rewriting, just append a wrapping export — but duplicate export is syntax error. Use python approach with body without export:
+          true
+      - name: Fix approach
+        run: |
+          python3 - <<'PY'
+lines = open('src/index.js').read().split('\n')
+n = ${{ inputs.lines }}
+body = '\n'.join(lines[:n])
+# cut from 'export default {' if included
+idx = body.find('export default {')
+if idx >= 0: body = body[:idx]
+body = body.replace('const connect = ', 'const connect = ')  # noop
+out = body + "\nconst __connectRef = connect;\n" if 'import { connect }' in body else body
+out = body
+# append new default that exposes homepage
+out += '''
+export default {
+  async fetch(request, env, ctx) {
+    return new Response("ok lines=''' + str(n) + '''");
+  }
+};
+'''
+open('/tmp/halfmain.js','w').write(out)
+PY
+          sed "s/name = \"v2ray\"/name = \"half-gw\"/; s|main = \"src/index.js\"|main = \"/tmp/halfmain.js\"|" wrangler.toml > /tmp/half.toml
           npx wrangler deploy -c /tmp/half.toml
