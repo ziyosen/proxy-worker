@@ -204,18 +204,6 @@ function sniffProtocol(buffer) {
   }
   return null;
 }
-    }
-  }
-  // Trojan: hash hex (0-9a-f) sepanjang 56 byte + CRLF
-  if (buffer.byteLength >= 58) {
-    const hash = new Uint8Array(buffer.slice(0, 56));
-    const isHexHash = /^([0-9a-f]{2}){28}$/i.test(arrayBufferToHex(hash)) &&
-      new Uint8Array(buffer.slice(56, 58))[0] === 0x0d &&
-      new Uint8Array(buffer.slice(56, 58))[1] === 0x0a;
-    if (isHexHash) return "trojan";
-  }
-  return null;
-}
 
 // ---------- websocket handler ----------
 async function websocketHandler(request, allowedUUIDs) {
