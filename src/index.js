@@ -524,7 +524,8 @@ async function generateSubList(request, env, url) {
   const ccFilter = url.searchParams.get("cc")?.split(",").filter(Boolean) || [];
   const limit = Math.min(parseInt(url.searchParams.get("limit")) || 10, 50);
   const format = url.searchParams.get("format") || "raw";
-  const fixedUUID = url.searchParams.get("uuid") || crypto.randomUUID(); // 1 UUID per panggilan, konsisten
+  const envUUIDs = parseUUIDList(env);
+  const fixedUUID = url.searchParams.get("uuid") || (envUUIDs[0] ?? crypto.randomUUID()); // pakai UUID terdaftar bila ada
 
   const kvPrx = await getKVPrxList();
   let pool = [];
