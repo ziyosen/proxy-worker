@@ -1,0 +1,18 @@
+name: Recreate v2ray worker
+on:
+  workflow_dispatch:
+jobs:
+  recreate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CF_API_TOKEN }}
+          accountId: ea1aab81dc8e22018131832d124a54fc
+      - name: Delete worker
+        run: |
+          set +e
+          npx wrangler delete --name v2ray --force 2>&1 || true
+      - name: Redeploy worker
+        run: npx wrangler deploy
