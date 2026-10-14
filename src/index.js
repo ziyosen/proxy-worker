@@ -178,6 +178,7 @@ function readTrojanHeader(buffer, allowedUUIDs) {
 
 // Sniffer: VLESS vs Trojan — VLESS: byte 56-57 = 0x0d 0x0a; Trojan: 58 byte hash pertama hex
 function sniffProtocol(buffer) {
+  console.log("sniff len=", buffer.byteLength, "b17=", new Uint8Array(buffer.slice(17,18))[0], "b19-21=", arrayBufferToHex(buffer.slice(19,22)));
   if (buffer.byteLength < 24) return null;
   // VLESS: posisi CRLF dihitung dari struktur: ver(1)+uuid(16)+optLen(1)+opt+cmd(1)+port(2)+atyp(1)+addr
   const optLength = new Uint8Array(buffer.slice(17, 18))[0];
