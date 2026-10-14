@@ -4,15 +4,12 @@ on:
 jobs:
   recreate:
     runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ea1aab81dc8e22018131832d124a54fc
     steps:
       - uses: actions/checkout@v4
-      - uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CF_API_TOKEN }}
-          accountId: ea1aab81dc8e22018131832d124a54fc
-      - name: Delete worker
-        run: |
-          set +e
-          npx wrangler delete --name v2ray --force 2>&1 || true
-      - name: Redeploy worker
+      - name: Install wrangler
+        run: npm i wrangler@3.90.0
+      - name: Deploy worker
         run: npx wrangler deploy
