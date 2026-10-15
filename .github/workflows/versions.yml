@@ -1,0 +1,33 @@
+name: List + rollback versions
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        required: true
+        default: 'v2ray'
+      version_id:
+        description: 'optional: target version id to rollback; empty = list only'
+        required: false
+        default: ''
+jobs:
+  v:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ea1aab81dc8e22018131832d124a54fc
+    steps:
+      - name: List versions
+        run: |
+          ACC=ea1aab81dc8e22018131832d124a54fc
+          NAME=${{ inputs.name }}
+          curl -s "https://api.cloudflare.com/client/v4/accounts/$ACC/workers/scripts/$NAME/versions" \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" | python3 -m json.tool | head -80 || true
+      - name: Rollback
+        if: ${{ inputs.version_id != '' }}
+        run: |
+          ACC=ea1aab81dc8e22018131832d124a54fc
+          NAME=${{ inputs.name }}
+          curl -s -X POST "https://api.cloudflare.com/client/v4/accounts/$ACC/workers/scripts/$NAME/rollback" \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"version_id\": \"${{ inputs.version_id }}\"}" | python3 -m json.tool | head -40 || true
