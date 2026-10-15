@@ -1,0 +1,31 @@
+name: Deploy with health-check retry
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        required: true
+        default: 'v2ray'
+jobs:
+  dr:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ea1aab81dc8e22018131832d124a54fc
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm i wrangler@4
+      - name: Deploy + verify loop
+        run: |
+          NAME=${{ inputs.name }}
+          sed "s/name = \"v2ray\"/name = \"$NAME\"/" wrangler.toml > /tmp/d.toml
+          for i in $(seq 1 8); do
+            echo "=== attempt $i ==="
+            npx wrangler deploy -c /tmp/d.toml && DEPLOYED=1 || DEPLOYED=0
+            sleep 15
+            CODE=$(curl -s -m 10 -o /dev/null -w "%{http_code}" "https://$NAME.benxx.workers.dev/")
+            echo "health: $CODE"
+            if [ "$CODE" = "200" ]; then echo "HEALTHY after attempt $i"; exit 0; fi
+            sleep 20
+          done
+          echo "STILL UNHEALTHY after 8 attempts"
+          exit 1
