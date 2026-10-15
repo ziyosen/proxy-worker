@@ -1,0 +1,26 @@
+name: Full versions list
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        required: true
+        default: 'v2ray'
+jobs:
+  v:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ea1aab81dc8e22018131832d124a54fc
+    steps:
+      - name: List all versions
+        run: |
+          ACC=ea1aab81dc8e22018131832d124a54fc
+          NAME=${{ inputs.name }}
+          curl -s "https://api.cloudflare.com/client/v4/accounts/$ACC/workers/scripts/$NAME/versions?per_page=50" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" > /tmp/vers.json
+          python3 -c "
+import json
+d = json.load(open('/tmp/vers.json'))
+items = d.get('result', {}).get('items') or []
+for v in items:
+    print(v.get('number'), v.get('id'), (v.get('metadata') or {}).get('created_on'))
+"
