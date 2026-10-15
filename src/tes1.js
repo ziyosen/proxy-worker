@@ -1,24 +1,31 @@
 import { connect } from "cloudflare:sockets";
 
-// ==================== VARIABLES & CONSTANTS ====================
+// Variables
 let serviceName = "";
 let APP_DOMAIN = "";
-let prxIP = "";
 
+let prxIP = "";
+let cachedPrxList = [];
+
+// Constant
 const horse = "dHJvamFu";
 const flash = "dm1lc3M=";
+const neko = "dmxlc3M=";
 const v2 = "djJyYXk=";
-const neko = "Y2xhc2g=";
 
 const PORTS = [443, 80];
-const PROTOCOLS = [atob(horse), atob(flash), "ss"];
-const KV_PRX_URL = "https://raw.githubusercontent.com/backup-heavenly-demons/gateway/refs/heads/main/kvProxyList.json";
+const PROTOCOLS = [atob(horse), atob(flash), atob(neko), "ss"];
+const SUB_PAGE_URL = "https://foolvpn.web.id/nautica";
+const KV_PRX_URL = "https://raw.githubusercontent.com/FoolVPN-ID/Nautica/refs/heads/main/kvProxyList.json";
+const PRX_BANK_URL = "https://raw.githubusercontent.com/FoolVPN-ID/Nautica/refs/heads/main/proxyList.txt";
 const DNS_SERVER_ADDRESS = "8.8.8.8";
 const DNS_SERVER_PORT = 53;
 const RELAY_SERVER_UDP = {
-  host: "udp-relay.hobihaus.space",
+  host: "udp-relay.hobihaus.space", // Kontribusi atau cek relay publik disini: https://hub.docker.com/r/kelvinzer0/udp-relay
   port: 7300,
 };
+const PRX_HEALTH_CHECK_API = "https://id1.foolvpn.web.id/api/v1/check";
+const CONVERTER_URL = "https://api.foolvpn.web.id/convert";
 const WS_READY_STATE_OPEN = 1;
 const WS_READY_STATE_CLOSING = 2;
 const CORS_HEADER_OPTIONS = {
@@ -27,437 +34,62 @@ const CORS_HEADER_OPTIONS = {
   "Access-Control-Max-Age": "86400",
 };
 
-// ==================== OPTIMIZATION SETTINGS ====================
-const PROXY_CACHE_TTL = 300; // 5 menit
-const DNS_CACHE_TTL = 300000; // 5 menit dalam ms
-const PROXY_TIMEOUT = 5000; // 5 detik timeout koneksi
-const HEALTH_CHECK_INTERVAL = 60000; // 1 menit
-const MAX_POOL_SIZE = 5;
-
-// ==================== CACHE & HEALTH STORAGE ====================
-const dnsCache = new Map();
-const proxyHealth = new Map();
-const connectionPool = new Map();
-
-// ==================== REGION MAP ====================
-const REGION_MAP = {
-  ASIA: ["ID", "SG", "MY", "PH", "TH", "VN", "JP", "KR", "CN", "HK", "TW"],
-  SOUTHASIA: ["IN", "BD", "PK", "LK", "NP", "AF", "BT", "MV"],
-  CENTRALASIA: ["KZ", "UZ", "TM", "KG", "TJ"],
-  NORTHASIA: ["RU"],
-  MIDDLEEAST: ["AE", "SA", "IR", "IQ", "JO", "IL", "YE", "SY", "OM", "KW", "QA", "BH", "LB"],
-  CIS: ["RU", "UA", "BY", "KZ", "UZ", "AM", "GE", "MD", "TJ", "KG", "TM", "AZ"],
-  WESTEUROPE: ["FR", "DE", "NL", "BE", "AT", "CH", "IE", "LU", "MC"],
-  EASTEUROPE: ["PL", "CZ", "SK", "HU", "RO", "BG", "MD", "UA", "BY"],
-  NORTHEUROPE: ["SE", "FI", "NO", "DK", "EE", "LV", "LT", "IS"],
-  SOUTHEUROPE: ["IT", "ES", "PT", "GR", "HR", "SI", "MT", "AL", "BA", "RS", "ME", "MK"],
-  EUROPE: ["FR", "DE", "NL", "BE", "AT", "CH", "IE", "LU", "MC", "PL", "CZ", "SK", "HU", "RO", "BG", "MD", "UA", "BY", "SE", "FI", "NO", "DK", "EE", "LV", "LT", "IS", "IT", "ES", "PT", "GR", "HR", "SI", "MT", "AL", "BA", "RS", "ME", "MK"],
-  AFRICA: ["ZA", "NG", "EG", "MA", "KE", "DZ", "TN", "GH", "CI", "SN", "ET"],
-  NORTHAMERICA: ["US", "CA", "MX"],
-  SOUTHAMERICA: ["BR", "AR", "CL", "CO", "PE", "VE", "EC", "UY", "PY", "BO"],
-  LATAM: ["MX", "BR", "AR", "CL", "CO", "PE", "VE", "EC", "UY", "PY", "BO", "CR", "GT", "PA", "DO", "HN", "NI", "SV"],
-  AMERICA: ["US", "CA", "MX", "BR", "AR", "CL", "CO", "PE", "VE", "EC"],
-  OCEANIA: ["AU", "NZ", "PG", "FJ"],
-  GLOBAL: []
-};
-
-// ==================== OPTIMIZED CACHE FUNCTIONS ====================
-async function getCachedData(cacheKey, fetchFunction, ttl = PROXY_CACHE_TTL) {
-  try {
-    const cache = caches.default;
-    let response = await cache.match(cacheKey);
-    
-    if (!response) {
-      const data = await fetchFunction();
-      response = new Response(JSON.stringify(data), {
-        headers: { 
-          'Cache-Control': `public, max-age=${ttl}`,
-          'Content-Type': 'application/json'
-        }
-      });
-      
-      // Non-blocking cache write
-      globalThis.ctx?.waitUntil?.(cache.put(cacheKey, response.clone()));
-    }
-    
-    return await response.json();
-  } catch (error) {
-    console.error(`Cache error for ${cacheKey}:`, error);
-    return await fetchFunction();
-  }
-}
-
-async function fetchWithTimeout(url, timeout = 5000, retries = 2) {
-  for (let i = 0; i <= retries; i++) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeout);
-    
-    try {
-      const response = await fetch(url, { 
-        signal: controller.signal,
-        headers: {
-          'Accept': 'application/json',
-          'User-Agent': 'Cloudflare-Worker/1.0'
-        }
-      });
-      clearTimeout(timeoutId);
-      
-      if (response.ok) return response;
-      
-      if (i < retries) {
-        console.warn(`Fetch failed (attempt ${i + 1}/${retries + 1}), retrying...`);
-        await new Promise(resolve => setTimeout(resolve, 1000));
-      }
-    } catch (error) {
-      clearTimeout(timeoutId);
-      if (i === retries) throw error;
-      console.warn(`Fetch error (attempt ${i + 1}/${retries + 1}):`, error.message);
-      await new Promise(resolve => setTimeout(resolve, 1000));
-    }
-  }
-  
-  throw new Error(`Failed to fetch ${url} after ${retries + 1} attempts`);
-}
+// Encrypted Stream Constants (Base64 Encoded)
+const SALT_A1 = atob("Vk1lc3MgSGVhZGVyIEFFQUQgS2V5X0xlbmd0aA==");
+const SALT_A2 = atob("Vk1lc3MgSGVhZGVyIEFFQUQgTm9uY2VfTGVuZ3Ro");
+const SALT_A3 = atob("Vk1lc3MgSGVhZGVyIEFFQUQgS2V5");
+const SALT_A4 = atob("Vk1lc3MgSGVhZGVyIEFFQUQgTm9uY2U=");
+const SALT_B1 = atob("QUVBRCBSZXNwIEhlYWRlciBMZW4gS2V5");
+const SALT_B2 = atob("QUVBRCBSZXNwIEhlYWRlciBMZW4gSVY=");
+const SALT_B3 = atob("QUVBRCBSZXNwIEhlYWRlciBLZXk=");
+const SALT_B4 = atob("QUVBRCBSZXNwIEhlYWRlciBJVg==");
 
 async function getKVPrxList(kvPrxUrl = KV_PRX_URL) {
-  if (!kvPrxUrl) throw new Error("No URL Provided!");
+  if (!kvPrxUrl) {
+    throw new Error("No URL Provided!");
+  }
 
-  return getCachedData(
-    `kv-prx-list:${kvPrxUrl}`,
-    async () => {
-      const response = await fetchWithTimeout(kvPrxUrl, 5000, 2);
-      return await response.json();
-    },
-    PROXY_CACHE_TTL
-  );
+  const kvPrx = await fetch(kvPrxUrl);
+  if (kvPrx.status == 200) {
+    return await kvPrx.json();
+  } else {
+    return {};
+  }
 }
 
-async function getPrxList(prxBankUrl) {
-  if (!prxBankUrl) return [];
+async function getPrxList(prxBankUrl = PRX_BANK_URL) {
+  /**
+   * Format:
+   *
+   * <IP>,<Port>,<Country ID>,<ORG>
+   * Contoh:
+   * 1.1.1.1,443,SG,Cloudflare Inc.
+   */
+  if (!prxBankUrl) {
+    throw new Error("No URL Provided!");
+  }
 
-  return getCachedData(
-    `prx-list:${prxBankUrl}`,
-    async () => {
-      const response = await fetchWithTimeout(prxBankUrl, 5000, 2);
-      const data = await response.json();
-      
-      return data.map(proxy => {
-        const ip = proxy.prxIP || proxy.ip || proxy.server;
-        const port = proxy.prxPort || proxy.port;
-        const country = proxy.country || proxy.cc || 'XX';
-        
-        if (!ip || !port) {
-          console.warn('Invalid proxy format:', proxy);
-          return null;
-        }
-        
+  const prxBank = await fetch(prxBankUrl);
+  if (prxBank.status == 200) {
+    const text = (await prxBank.text()) || "";
+
+    const prxString = text.split("\n").filter(Boolean);
+    cachedPrxList = prxString
+      .map((entry) => {
+        const [prxIP, prxPort, country, org] = entry.split(",");
         return {
-          prxIP: ip,
-          prxPort: port,
-          country: country.toUpperCase()
+          prxIP: prxIP || "Unknown",
+          prxPort: prxPort || "Unknown",
+          country: country || "Unknown",
+          org: org || "Unknown Org",
         };
-      }).filter(Boolean);
-    },
-    PROXY_CACHE_TTL
-  );
+      })
+      .filter(Boolean);
+  }
+
+  return cachedPrxList;
 }
 
-// ==================== HEALTH CHECK SYSTEM ====================
-async function checkProxyHealth(proxyAddress) {
-  const [host, port] = proxyAddress.split(':');
-  const startTime = Date.now();
-  
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), PROXY_TIMEOUT);
-    
-    const socket = connect({
-      hostname: host,
-      port: parseInt(port),
-    });
-    
-    const writer = socket.writable.getWriter();
-    await writer.write(new Uint8Array([]));
-    writer.releaseLock();
-    
-    clearTimeout(timeoutId);
-    const latency = Date.now() - startTime;
-    
-    const currentHealth = proxyHealth.get(proxyAddress) || { successRate: 0 };
-    
-    proxyHealth.set(proxyAddress, {
-      latency,
-      lastCheck: Date.now(),
-      alive: true,
-      successRate: (currentHealth.successRate + 1) / 2
-    });
-    
-    try { socket.close(); } catch(e) {}
-    return { alive: true, latency };
-  } catch (error) {
-    proxyHealth.set(proxyAddress, {
-      latency: 9999,
-      lastCheck: Date.now(),
-      alive: false,
-      successRate: 0
-    });
-    return { alive: false, latency: 9999 };
-  }
-}
-
-async function getFastestProxies(candidates, count = 3) {
-  const healthChecks = await Promise.allSettled(
-    candidates.map(async (proxy) => {
-      const address = `${proxy.prxIP}:${proxy.prxPort}`;
-      const health = proxyHealth.get(address);
-      
-      if (health && !health.alive) return null;
-      
-      if (health && (Date.now() - health.lastCheck) < HEALTH_CHECK_INTERVAL) {
-        return { proxy, address, latency: health.latency };
-      }
-      
-      const result = await checkProxyHealth(address);
-      return result.alive ? { proxy, address, latency: result.latency } : null;
-    })
-  );
-  
-  const aliveProxies = healthChecks
-    .filter(r => r.status === 'fulfilled' && r.value !== null)
-    .map(r => r.value)
-    .sort((a, b) => a.latency - b.latency);
-  
-  return aliveProxies.slice(0, Math.max(count, 1));
-}
-
-async function backgroundHealthCheck(proxies) {
-  const shuffled = [...proxies].sort(() => Math.random() - 0.5);
-  const toCheck = shuffled.slice(0, 5);
-  
-  await Promise.allSettled(
-    toCheck.map(proxy => 
-      checkProxyHealth(`${proxy.prxIP}:${proxy.prxPort}`)
-    )
-  );
-}
-
-// ==================== PROXY SELECTION LOGIC ====================
-function matchProxyPattern(path) {
-  const proxyListMatch = path.match(/^\/PROXYLIST\/([A-Z]{2}(,[A-Z]{2})*)$/i);
-  if (proxyListMatch) {
-    return { type: 'PROXYLIST', countries: proxyListMatch[1].toUpperCase().split(",") };
-  }
-  
-  const allMatch = path.match(/^\/ALL(\d+)?$/i);
-  if (allMatch) {
-    return { type: 'ALL', index: allMatch[1] ? parseInt(allMatch[1], 10) - 1 : null };
-  }
-  
-  const putarMatch = path.match(/^\/PUTAR(\d+)?$/i);
-  if (putarMatch) {
-    return { type: 'PUTAR', count: putarMatch[1] ? parseInt(putarMatch[1], 10) : null };
-  }
-  
-  const regionMatch = path.match(/^\/([A-Z]+)(\d+)?$/i);
-  if (regionMatch && REGION_MAP[regionMatch[1].toUpperCase()] !== undefined) {
-    return {
-      type: 'REGION',
-      region: regionMatch[1].toUpperCase(),
-      index: regionMatch[2] ? parseInt(regionMatch[2], 10) - 1 : null
-    };
-  }
-  
-  const countryMatch = path.match(/^\/([A-Z]{2})(\d+)?$/);
-  if (countryMatch && !REGION_MAP[countryMatch[1].toUpperCase()]) {
-    return {
-      type: 'COUNTRY',
-      country: countryMatch[1].toUpperCase(),
-      index: countryMatch[2] ? parseInt(countryMatch[2], 10) - 1 : null
-    };
-  }
-  
-  const ipPortMatch = path.match(/^\/(.+[:=-]\d+)$/);
-  if (ipPortMatch) {
-    return { type: 'DIRECT', ip: ipPortMatch[1].replace(/[=:-]/, ":") };
-  }
-  
-  if (path.length === 3 || path.includes(',')) {
-    return { type: 'LEGACY', keys: path.replace("/", "").toUpperCase().split(",") };
-  }
-  
-  return null;
-}
-
-function groupBy(array, key) {
-  return array.reduce((acc, item) => {
-    const groupKey = item[key];
-    if (!acc[groupKey]) acc[groupKey] = [];
-    acc[groupKey].push(item);
-    return acc;
-  }, {});
-}
-
-function getRandomItem(arr) {
-  return arr[Math.floor(Math.random() * arr.length)];
-}
-
-function selectProxyFromPattern(pattern, proxies, kvPrx) {
-  switch (pattern.type) {
-    case 'PROXYLIST': {
-      if (proxies.length > 0) {
-        const filtered = proxies.filter(p => pattern.countries.includes(p.country));
-        if (filtered.length > 0) {
-          const selected = getRandomItem(filtered);
-          return `${selected.prxIP}:${selected.prxPort}`;
-        }
-      }
-      
-      const availableCountries = pattern.countries.filter(code => kvPrx[code] && kvPrx[code].length > 0);
-      if (availableCountries.length > 0) {
-        const prxKey = getRandomItem(availableCountries);
-        return getRandomItem(kvPrx[prxKey]);
-      }
-      return null;
-    }
-    
-    case 'ALL': {
-      if (proxies.length > 0) {
-        if (pattern.index !== null) {
-          const grouped = groupBy(proxies, 'country');
-          const selected = [];
-          for (const country in grouped) {
-            if (pattern.index < grouped[country].length) {
-              selected.push(grouped[country][pattern.index]);
-            }
-          }
-          if (selected.length > 0) {
-            const proxy = getRandomItem(selected);
-            return `${proxy.prxIP}:${proxy.prxPort}`;
-          }
-        } else {
-          const proxy = getRandomItem(proxies);
-          return `${proxy.prxIP}:${proxy.prxPort}`;
-        }
-      }
-      
-      const allProxies = Object.values(kvPrx).flat();
-      if (allProxies.length > 0) return getRandomItem(allProxies);
-      return null;
-    }
-    
-    case 'PUTAR': {
-      if (proxies.length > 0) {
-        const grouped = groupBy(proxies, 'country');
-        const countries = Object.keys(grouped);
-        
-        let selectedCountries;
-        if (pattern.count === null) {
-          selectedCountries = countries;
-        } else {
-          const shuffled = [...countries].sort(() => Math.random() - 0.5);
-          selectedCountries = shuffled.slice(0, Math.min(pattern.count, countries.length));
-        }
-        
-        const selectedProxies = selectedCountries.map(c => getRandomItem(grouped[c]));
-        const proxy = getRandomItem(selectedProxies);
-        return `${proxy.prxIP}:${proxy.prxPort}`;
-      }
-      
-      const kvCountries = Object.keys(kvPrx).filter(code => kvPrx[code] && kvPrx[code].length > 0);
-      if (kvCountries.length > 0) {
-        let selected;
-        if (pattern.count === null) {
-          selected = kvCountries;
-        } else {
-          const shuffled = [...kvCountries].sort(() => Math.random() - 0.5);
-          selected = shuffled.slice(0, Math.min(pattern.count, kvCountries.length));
-        }
-        const prxKey = getRandomItem(selected);
-        return getRandomItem(kvPrx[prxKey]);
-      }
-      return null;
-    }
-    
-    case 'REGION': {
-      const countries = REGION_MAP[pattern.region];
-      
-      if (proxies.length > 0) {
-        const filtered = pattern.region === "GLOBAL" 
-          ? proxies 
-          : proxies.filter(p => countries.includes(p.country));
-        
-        if (filtered.length > 0) {
-          let proxy;
-          if (pattern.index !== null && pattern.index < filtered.length) {
-            proxy = filtered[pattern.index];
-          } else {
-            proxy = getRandomItem(filtered);
-          }
-          return `${proxy.prxIP}:${proxy.prxPort}`;
-        }
-      }
-      
-      let availableProxies = [];
-      if (pattern.region === "GLOBAL") {
-        availableProxies = Object.values(kvPrx).flat();
-      } else {
-        for (const country of countries) {
-          if (kvPrx[country]) {
-            availableProxies.push(...kvPrx[country]);
-          }
-        }
-      }
-      
-      if (availableProxies.length > 0) {
-        if (pattern.index !== null && pattern.index < availableProxies.length) {
-          return availableProxies[pattern.index];
-        }
-        return getRandomItem(availableProxies);
-      }
-      return null;
-    }
-    
-    case 'COUNTRY': {
-      if (proxies.length > 0) {
-        const filtered = proxies.filter(p => p.country === pattern.country);
-        if (filtered.length > 0) {
-          let proxy;
-          if (pattern.index !== null && pattern.index < filtered.length) {
-            proxy = filtered[pattern.index];
-          } else {
-            proxy = getRandomItem(filtered);
-          }
-          return `${proxy.prxIP}:${proxy.prxPort}`;
-        }
-      }
-      
-      if (kvPrx[pattern.country] && kvPrx[pattern.country].length > 0) {
-        if (pattern.index !== null && pattern.index < kvPrx[pattern.country].length) {
-          return kvPrx[pattern.country][pattern.index];
-        }
-        return getRandomItem(kvPrx[pattern.country]);
-      }
-      return null;
-    }
-    
-    case 'DIRECT': {
-      return pattern.ip;
-    }
-    
-    case 'LEGACY': {
-      const prxKey = getRandomItem(pattern.keys);
-      if (kvPrx[prxKey] && kvPrx[prxKey].length > 0) {
-        return getRandomItem(kvPrx[prxKey]);
-      }
-      return null;
-    }
-    
-    default:
-      return null;
-  }
-}
-
-// ==================== REVERSE PROXY ====================
 async function reverseWeb(request, target, targetPath) {
   const targetUrl = new URL(request.url);
   const targetChunk = target.split(":");
@@ -467,6 +99,7 @@ async function reverseWeb(request, target, targetPath) {
   targetUrl.pathname = targetPath || targetUrl.pathname;
 
   const modifiedRequest = new Request(targetUrl, request);
+
   modifiedRequest.headers.set("X-Forwarded-Host", request.headers.get("Host"));
 
   const response = await fetch(modifiedRequest);
@@ -480,119 +113,8 @@ async function reverseWeb(request, target, targetPath) {
   return newResponse;
 }
 
-// ==================== ASSET EMBEDDING ====================
-function bufferToBase64(buffer) {
-    let binary = '';
-    const bytes = new Uint8Array(buffer);
-    const len = bytes.byteLength;
-    for (let i = 0; i < len; i++) {
-        binary += String.fromCharCode(bytes[i]);
-    }
-    return btoa(binary);
-}
-
-async function embedAssets(response, originalUrl) {
-  const rewriter = new HTMLRewriter();
-
-  const fetchAndEncode = async (assetUrl) => {
-    try {
-      const absoluteUrl = new URL(assetUrl, originalUrl.href).href;
-      const assetResponse = await fetch(absoluteUrl);
-      if (!assetResponse.ok) return null;
-
-      const contentType = assetResponse.headers.get('content-type') || 'application/octet-stream';
-      const buffer = await assetResponse.arrayBuffer();
-      const base64 = bufferToBase64(buffer);
-      return `data:${contentType};base64,${base64}`;
-    } catch (e) {
-      console.error(`Failed to fetch and embed asset: ${assetUrl}`, e);
-      return null;
-    }
-  };
-
-  rewriter.on('link[rel="stylesheet"]', {
-    async element(element) {
-      const href = element.getAttribute('href');
-      if (href) {
-        const absoluteUrl = new URL(href, originalUrl.href).href;
-        const cssResponse = await fetch(absoluteUrl);
-        if (cssResponse.ok) {
-            const cssText = await cssResponse.text();
-            element.replace(`<style>${cssText}</style>`, { html: true });
-        }
-      }
-    },
-  });
-
-  rewriter.on('img', {
-    async element(element) {
-      const src = element.getAttribute('src');
-      if (src && !src.startsWith('data:')) {
-        const dataUri = await fetchAndEncode(src);
-        if (dataUri) {
-          element.setAttribute('src', dataUri);
-        }
-      }
-    },
-  });
-
-  rewriter.on('script[src]', {
-      async element(element) {
-          const src = element.getAttribute('src');
-          if (src) {
-              const absoluteUrl = new URL(src, originalUrl.href).href;
-              const scriptResponse = await fetch(absoluteUrl);
-              if (scriptResponse.ok) {
-                  const scriptText = await scriptResponse.text();
-                  element.removeAttribute('src');
-                  element.append(scriptText, { html: false });
-              }
-          }
-      }
-  });
-
-  return rewriter.transform(response);
-}
-
-// ==================== PRELOAD PROXY LIST ====================
-async function preloadProxyList(env) {
-  const promises = [];
-  
-  promises.push(
-    getKVPrxList().catch(err => {
-      console.error('Failed to load KV proxy list:', err);
-      return {};
-    })
-  );
-  
-  if (env.PRX_BANK_URL) {
-    promises.push(
-      getPrxList(env.PRX_BANK_URL).catch(err => {
-        console.error('Failed to load bank proxy list:', err);
-        return [];
-      })
-    );
-  }
-  
-  const results = await Promise.allSettled(promises);
-  
-  const kvPrx = results[0].status === 'fulfilled' ? results[0].value : {};
-  const proxies = results[1]?.status === 'fulfilled' ? results[1].value : [];
-  
-  // Background health check
-  if (proxies.length > 0) {
-    globalThis.ctx?.waitUntil?.(backgroundHealthCheck(proxies));
-  }
-  
-  return { kvPrx, proxies };
-}
-
-// ==================== MAIN FETCH HANDLER ====================
 export default {
   async fetch(request, env, ctx) {
-    // Store ctx globally untuk cache API
-    globalThis.ctx = ctx;
-    
     try {
       const url = new URL(request.url);
       APP_DOMAIN = url.hostname;
@@ -600,96 +122,190 @@ export default {
 
       const upgradeHeader = request.headers.get("Upgrade");
 
+      // Handle prx client
       if (upgradeHeader === "websocket") {
-        const path = url.pathname;
-        console.log(`[WS] Path: ${path}`);
+        const prxMatch = url.pathname.match(/^\/(.+[:=-]\d+)$/);
 
-        // Kunci path: harus diawali /Benxx-Project/
-        if (!path.startsWith("/Benxx-Project/")) {
-          return new Response("Not Found", { status: 404 });
+        if (url.pathname.length == 3 || url.pathname.match(",")) {
+          // Contoh: /ID, /SG, dll
+          const prxKeys = url.pathname.replace("/", "").toUpperCase().split(",");
+          const prxKey = prxKeys[Math.floor(Math.random() * prxKeys.length)];
+          const kvPrx = await getKVPrxList();
+
+          prxIP = kvPrx[prxKey][Math.floor(Math.random() * kvPrx[prxKey].length)];
+
+          return await websocketHandler(request);
+        } else if (prxMatch) {
+          prxIP = prxMatch[1];
+          return await websocketHandler(request);
         }
+      }
 
-        // Hapus prefix /Benxx-Project biar pattern matching jalan normal
-        const cleanPath = path.replace(/^\/Benxx-Project/, "") || "/";
-        const pattern = matchProxyPattern(cleanPath);
-        
-        if (pattern) {
-          // Langsung accept WebSocket tanpa nunggu proxy siap
-          const webSocketPair = new WebSocketPair();
-          const [client, webSocket] = Object.values(webSocketPair);
-          webSocket.accept();
-          
-          // Setup di background
-          ctx.waitUntil(
-            (async () => {
-              try {
-                const startTime = Date.now();
-                const { proxies, kvPrx } = await preloadProxyList(env);
-                console.log(`[PERF] Proxy list loaded in ${Date.now() - startTime}ms`);
-                
-                const selectedPrxIP = selectProxyFromPattern(pattern, proxies, kvPrx);
-                
-                if (!selectedPrxIP) {
-                  console.error(`No proxy available for pattern: ${pattern.type}`);
-                  safeCloseWebSocket(webSocket);
-                  return;
-                }
-                
-                prxIP = selectedPrxIP;
-                console.log(`[SELECTED] ${prxIP}`);
-                
-                await setupWebSocketStream(webSocket, request, env);
-              } catch (error) {
-                console.error('WebSocket setup error:', error);
-                safeCloseWebSocket(webSocket);
+      if (url.pathname.startsWith("/sub")) {
+        return Response.redirect(SUB_PAGE_URL + `?host=${APP_DOMAIN}`, 301);
+      } else if (url.pathname.startsWith("/check")) {
+        const target = url.searchParams.get("target").split(":");
+        const result = await checkPrxHealth(target[0], target[1] || "443");
+
+        return new Response(JSON.stringify(result), {
+          status: 200,
+          headers: {
+            ...CORS_HEADER_OPTIONS,
+            "Content-Type": "application/json",
+          },
+        });
+      } else if (url.pathname.startsWith("/api/v1")) {
+        const apiPath = url.pathname.replace("/api/v1", "");
+
+        if (apiPath.startsWith("/sub")) {
+          const filterCC = url.searchParams.get("cc")?.split(",") || [];
+          const filterPort = url.searchParams.get("port")?.split(",") || PORTS;
+          const filterVPN = url.searchParams.get("vpn")?.split(",") || PROTOCOLS;
+          const filterLimit = parseInt(url.searchParams.get("limit")) || 10;
+          const filterFormat = url.searchParams.get("format") || "raw";
+          const fillerDomain = url.searchParams.get("domain") || APP_DOMAIN;
+
+          const prxBankUrl = url.searchParams.get("prx-list") || env.PRX_BANK_URL;
+          const prxList = await getPrxList(prxBankUrl)
+            .then((prxs) => {
+              // Filter CC
+              if (filterCC.length) {
+                return prxs.filter((prx) => filterCC.includes(prx.country));
               }
-            })()
-          );
-          
-          // Return WebSocket response SEGERA
-          return new Response(null, {
-            status: 101,
-            webSocket: client,
+              return prxs;
+            })
+            .then((prxs) => {
+              // shuffle result
+              shuffleArray(prxs);
+              return prxs;
+            });
+
+          const uuid = crypto.randomUUID();
+          const result = [];
+          for (const prx of prxList) {
+            const uri = new URL(`${atob(horse)}://${fillerDomain}`);
+            uri.searchParams.set("encryption", "none");
+            uri.searchParams.set("type", "ws");
+            uri.searchParams.set("host", APP_DOMAIN);
+
+            for (const port of filterPort) {
+              for (const protocol of filterVPN) {
+                if (result.length >= filterLimit) break;
+
+                uri.protocol = protocol;
+                uri.port = port.toString();
+                if (protocol == "ss") {
+                  uri.username = btoa(`none:${uuid}`);
+                  uri.searchParams.set(
+                    "plugin",
+                    `${atob(v2)}-plugin${port == 80 ? "" : ";tls"};mux=0;mode=websocket;path=/${prx.prxIP}-${
+                      prx.prxPort
+                    };host=${APP_DOMAIN}`,
+                  );
+                } else {
+                  uri.username = uuid;
+                }
+
+                uri.searchParams.set("security", port == 443 ? "tls" : "none");
+                uri.searchParams.set("sni", port == 80 && protocol == atob(flash) ? "" : APP_DOMAIN);
+                uri.searchParams.set("path", `/${prx.prxIP}-${prx.prxPort}`);
+
+                uri.hash = `${result.length + 1} ${getFlagEmoji(prx.country)} ${prx.org} WS ${
+                  port == 443 ? "TLS" : "NTLS"
+                } [${serviceName}]`;
+                result.push(uri.toString());
+              }
+            }
+          }
+
+          let finalResult = "";
+          switch (filterFormat) {
+            case "raw":
+              finalResult = result.join("\n");
+              break;
+            case atob(v2):
+              finalResult = btoa(result.join("\n"));
+              break;
+            case atob(neko):
+            case "sfa":
+            case "bfr":
+              const res = await fetch(CONVERTER_URL, {
+                method: "POST",
+                body: JSON.stringify({
+                  url: result.join(","),
+                  format: filterFormat,
+                  template: "cf",
+                }),
+              });
+              if (res.status == 200) {
+                finalResult = await res.text();
+              } else {
+                return new Response(res.statusText, {
+                  status: res.status,
+                  headers: {
+                    ...CORS_HEADER_OPTIONS,
+                  },
+                });
+              }
+              break;
+          }
+
+          return new Response(finalResult, {
+            status: 200,
+            headers: {
+              ...CORS_HEADER_OPTIONS,
+            },
           });
+        } else if (apiPath.startsWith("/myip")) {
+          return new Response(
+            JSON.stringify({
+              ip:
+                request.headers.get("cf-connecting-ipv6") ||
+                request.headers.get("cf-connecting-ip") ||
+                request.headers.get("x-real-ip"),
+              colo: request.headers.get("cf-ray")?.split("-")[1],
+              ...request.cf,
+            }),
+            {
+              headers: {
+                ...CORS_HEADER_OPTIONS,
+              },
+            },
+          );
         }
-        
-        return new Response('Invalid WebSocket path', { status: 400 });
       }
 
-      // Handle non-WebSocket
-      const targetReversePrx = env.REVERSE_PRX_TARGET || "cinema.xinquins.de5.net";
-      const response = await reverseWeb(request, targetReversePrx);
-
-      const contentType = response.headers.get('content-type') || '';
-
-      if (env.EMBED_ASSETS === 'true' && contentType.includes('text/html')) {
-        return embedAssets(response, new URL(request.url));
-      }
-
-      return response;
+      const targetReversePrx = env.REVERSE_PRX_TARGET || "example.com";
+      return await reverseWeb(request, targetReversePrx);
     } catch (err) {
-      console.error('Global error:', err);
       return new Response(`An error occurred: ${err.toString()}`, {
         status: 500,
-        headers: CORS_HEADER_OPTIONS,
+        headers: {
+          ...CORS_HEADER_OPTIONS,
+        },
       });
     }
   },
 };
 
-// ==================== WEBSOCKET STREAM SETUP ====================
-async function setupWebSocketStream(webSocket, request, env) {
+async function websocketHandler(request) {
+  const webSocketPair = new WebSocketPair();
+  const [client, webSocket] = Object.values(webSocketPair);
+
+  webSocket.accept();
+
   let addressLog = "";
   let portLog = "";
-  
   const log = (info, event) => {
     console.log(`[${addressLog}:${portLog}] ${info}`, event || "");
   };
-  
   const earlyDataHeader = request.headers.get("sec-websocket-protocol") || "";
+
   const readableWebSocketStream = makeReadableWebSocketStream(webSocket, earlyDataHeader, log);
 
-  let remoteSocketWrapper = { value: null };
+  let remoteSocketWrapper = {
+    value: null,
+  };
   let isDNS = false;
 
   readableWebSocketStream
@@ -704,10 +320,9 @@ async function setupWebSocketStream(webSocket, request, env) {
               webSocket,
               null,
               log,
-              RELAY_SERVER_UDP
+              RELAY_SERVER_UDP,
             );
           }
-          
           if (remoteSocketWrapper.value) {
             const writer = remoteSocketWrapper.value.writable.getWriter();
             await writer.write(chunk);
@@ -721,7 +336,9 @@ async function setupWebSocketStream(webSocket, request, env) {
           if (protocol === atob(horse)) {
             protocolHeader = readHorseHeader(chunk);
           } else if (protocol === atob(flash)) {
-            protocolHeader = readFlashHeader(chunk);
+            protocolHeader = await readStreamHeader(chunk);
+          } else if (protocol === atob(neko)) {
+            protocolHeader = readNekoHeader(chunk);
           } else if (protocol === "ss") {
             protocolHeader = readSsHeader(chunk);
           } else {
@@ -735,6 +352,16 @@ async function setupWebSocketStream(webSocket, request, env) {
             throw new Error(protocolHeader.message);
           }
 
+          // Generate stream response header if needed
+          let responseHeader = protocolHeader.version;
+          if (protocol === atob(flash) && protocolHeader.needsResponse) {
+            responseHeader = await generateStreamResponseHeader(
+              protocolHeader.responseOptions,
+              protocolHeader.encKey,
+              protocolHeader.encIv,
+            );
+          }
+
           if (protocolHeader.isUDP) {
             if (protocolHeader.portRemote === 53) {
               isDNS = true;
@@ -743,9 +370,9 @@ async function setupWebSocketStream(webSocket, request, env) {
                 DNS_SERVER_PORT,
                 chunk,
                 webSocket,
-                protocolHeader.version,
+                responseHeader,
                 log,
-                RELAY_SERVER_UDP
+                RELAY_SERVER_UDP,
               );
             }
 
@@ -754,9 +381,9 @@ async function setupWebSocketStream(webSocket, request, env) {
               protocolHeader.portRemote,
               chunk,
               webSocket,
-              protocolHeader.version,
+              responseHeader,
               log,
-              RELAY_SERVER_UDP
+              RELAY_SERVER_UDP,
             );
           }
 
@@ -766,8 +393,8 @@ async function setupWebSocketStream(webSocket, request, env) {
             protocolHeader.portRemote,
             protocolHeader.rawClientData,
             webSocket,
-            protocolHeader.version,
-            log
+            responseHeader,
+            log,
           );
         },
         close() {
@@ -776,14 +403,18 @@ async function setupWebSocketStream(webSocket, request, env) {
         abort(reason) {
           log(`readableWebSocketStream is abort`, JSON.stringify(reason));
         },
-      })
+      }),
     )
     .catch((err) => {
       log("readableWebSocketStream pipeTo error", err);
     });
+
+  return new Response(null, {
+    status: 101,
+    webSocket: client,
+  });
 }
 
-// ==================== PROTOCOL SNIFFER ====================
 async function protocolSniffer(buffer) {
   if (buffer.byteLength >= 62) {
     const horseDelimiter = new Uint8Array(buffer.slice(56, 60));
@@ -796,15 +427,80 @@ async function protocolSniffer(buffer) {
     }
   }
 
-  const flashDelimiter = new Uint8Array(buffer.slice(1, 17));
-  if (arrayBufferToHex(flashDelimiter).match(/^[0-9a-f]{8}[0-9a-f]{4}4[0-9a-f]{3}[89ab][0-9a-f]{3}[0-9a-f]{12}$/i)) {
+  // Light protocol detection (VLESS) - check UUID v4 pattern
+  if (buffer.byteLength >= 18) {
+    const version = new Uint8Array(buffer.slice(0, 1))[0];
+    if (version === 0) {
+      const protocolUuid = new Uint8Array(buffer.slice(1, 17));
+      // Hanya mendukung UUID v4
+      if (arrayBufferToHex(protocolUuid).match(/^[0-9a-f]{8}[0-9a-f]{4}4[0-9a-f]{3}[89ab][0-9a-f]{3}[0-9a-f]{12}$/i)) {
+        return atob(neko);
+      }
+    }
+  }
+
+  // VMess AEAD detection: minimum 42 bytes (authId 16 + encLen 18 + nonce 8)
+  // But we need to be more selective - check if it's NOT shadowsocks first
+  if (buffer.byteLength >= 42) {
+    // Shadowsocks ATYP is always 1, 3, or 4 at first byte
+    const firstByte = new Uint8Array(buffer.slice(0, 1))[0];
+
+    // If first byte looks like SS address type, it's probably SS
+    if (firstByte === 0x01 || firstByte === 0x03 || firstByte === 0x04) {
+      // Likely Shadowsocks, not VMess
+      return "ss";
+    }
+
+    // Otherwise, assume it's VMess AEAD
     return atob(flash);
   }
 
-  return "ss";
+  return "ss"; // default
 }
 
-// ==================== TCP OUTBOUND (OPTIMIZED) ====================
+async function generateStreamResponseHeader(responseOptions, encKey, encIv) {
+  try {
+    // Hash the key and IV from request header - NOTE: swapped compared to variable names!
+    // In Rust: key = SHA256(key)[..16], iv = SHA256(iv)[..16]
+    // Then use these for KDF base
+    const key = (await sha256(encKey)).slice(0, 16);
+    const iv = (await sha256(encIv)).slice(0, 16);
+
+    // Encrypt length (2 bytes for value 4)
+    const lengthKey = (await kdf(key, [SALT_B1])).slice(0, 16);
+    const lengthIv = (await kdf(iv, [SALT_B2])).slice(0, 12);
+
+    const lengthData = new Uint8Array(2);
+    lengthData[0] = 0;
+    lengthData[1] = 4;
+
+    const encryptedLength = await aesGcmEncrypt(lengthKey, lengthIv, lengthData, new Uint8Array(0));
+
+    // Create header payload (4 bytes)
+    const headerPayload = new Uint8Array([
+      responseOptions[0], // options[0] from request
+      0x00,
+      0x00,
+      0x00, // padding
+    ]);
+
+    const payloadKey = (await kdf(key, [SALT_B3])).slice(0, 16);
+    const payloadIv = (await kdf(iv, [SALT_B4])).slice(0, 12);
+
+    const encryptedPayload = await aesGcmEncrypt(payloadKey, payloadIv, headerPayload, new Uint8Array(0));
+
+    // Combine length + payload
+    const response = new Uint8Array(encryptedLength.length + encryptedPayload.length);
+    response.set(encryptedLength, 0);
+    response.set(encryptedPayload, encryptedLength.length);
+
+    return response;
+  } catch (e) {
+    console.error("Failed to generate stream response:", e);
+    return new Uint8Array(0);
+  }
+}
+
 async function handleTCPOutBound(
   remoteSocket,
   addressRemote,
@@ -812,82 +508,42 @@ async function handleTCPOutBound(
   rawClientData,
   webSocket,
   responseHeader,
-  log
+  log,
 ) {
   async function connectAndWrite(address, port) {
     const tcpSocket = connect({
       hostname: address,
       port: port,
     });
-    
     remoteSocket.value = tcpSocket;
-    
+    log(`connected to ${address}:${port}`);
     const writer = tcpSocket.writable.getWriter();
     await writer.write(rawClientData);
     writer.releaseLock();
-    
-    const startTime = Date.now();
-    log(`Connected to ${address}:${port}`);
-    
-    // Update health
-    const key = `${address}:${port}`;
-    proxyHealth.set(key, {
-      latency: Date.now() - startTime,
-      lastCheck: Date.now(),
-      alive: true
-    });
 
     return tcpSocket;
   }
 
   async function retry() {
-    log('Retrying with proxy...');
-    
-    if (prxIP) {
-      const [proxyHost, proxyPort] = prxIP.split(':');
-      
-      try {
-        const tcpSocket = await connectAndWrite(
-          proxyHost || addressRemote,
-          parseInt(proxyPort) || portRemote
-        );
-        
-        tcpSocket.closed
-          .catch((error) => {
-            log("Retry tcpSocket closed error", error);
-          })
-          .finally(() => {
-            safeCloseWebSocket(webSocket);
-          });
-        
-        remoteSocketToWS(tcpSocket, webSocket, responseHeader, null, log);
-        return;
-      } catch (error) {
-        log(`Proxy connection failed: ${error.message}`);
-      }
-    }
-    
-    // Fallback: coba langsung lagi
-    log('Trying direct connection again...');
-    try {
-      const tcpSocket = await connectAndWrite(addressRemote, portRemote);
-      remoteSocketToWS(tcpSocket, webSocket, responseHeader, null, log);
-    } catch (error) {
-      log(`All connections failed: ${error.message}`);
-      safeCloseWebSocket(webSocket);
-    }
+    const tcpSocket = await connectAndWrite(
+      prxIP.split(/[:=-]/)[0] || addressRemote,
+      prxIP.split(/[:=-]/)[1] || portRemote,
+    );
+    tcpSocket.closed
+      .catch((error) => {
+        console.log("retry tcpSocket closed error", error);
+      })
+      .finally(() => {
+        safeCloseWebSocket(webSocket);
+      });
+    remoteSocketToWS(tcpSocket, webSocket, responseHeader, null, log);
   }
 
-  try {
-    const tcpSocket = await connectAndWrite(addressRemote, portRemote);
-    remoteSocketToWS(tcpSocket, webSocket, responseHeader, retry, log);
-  } catch (error) {
-    log(`Direct connection failed: ${error.message}`);
-    await retry();
-  }
+  const tcpSocket = await connectAndWrite(addressRemote, portRemote);
+
+  remoteSocketToWS(tcpSocket, webSocket, responseHeader, retry, log);
 }
 
-// ==================== UDP OUTBOUND ====================
 async function handleUDPOutbound(targetAddress, targetPort, dataChunk, webSocket, responseHeader, log, relay) {
   try {
     let protocolHeader = responseHeader;
@@ -927,35 +583,35 @@ async function handleUDPOutbound(targetAddress, targetPort, dataChunk, webSocket
         abort(reason) {
           console.error(`UDP connection aborted due to ${reason}`);
         },
-      })
+      }),
     );
   } catch (e) {
     console.error(`Error while handling UDP outbound: ${e.message}`);
   }
 }
 
-// ==================== STREAM HELPERS ====================
 function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
   let readableStreamCancel = false;
   const stream = new ReadableStream({
     start(controller) {
       webSocketServer.addEventListener("message", (event) => {
-        if (readableStreamCancel) return;
+        if (readableStreamCancel) {
+          return;
+        }
         const message = event.data;
         controller.enqueue(message);
       });
-      
       webSocketServer.addEventListener("close", () => {
         safeCloseWebSocket(webSocketServer);
-        if (readableStreamCancel) return;
+        if (readableStreamCancel) {
+          return;
+        }
         controller.close();
       });
-      
       webSocketServer.addEventListener("error", (err) => {
         log("webSocketServer has error");
         controller.error(err);
       });
-      
       const { earlyData, error } = base64ToArrayBuffer(earlyDataHeader);
       if (error) {
         controller.error(error);
@@ -966,7 +622,9 @@ function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
 
     pull(controller) {},
     cancel(reason) {
-      if (readableStreamCancel) return;
+      if (readableStreamCancel) {
+        return;
+      }
       log(`ReadableStream was canceled, due to ${reason}`);
       readableStreamCancel = true;
       safeCloseWebSocket(webSocketServer);
@@ -976,7 +634,245 @@ function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
   return stream;
 }
 
-// ==================== PROTOCOL READERS ====================
+// Crypto Helper Functions
+async function md5(...inputs) {
+  const combined = new Uint8Array(inputs.reduce((acc, input) => acc + input.length, 0));
+  let offset = 0;
+  for (const input of inputs) {
+    combined.set(new Uint8Array(input), offset);
+    offset += input.length;
+  }
+  const hashBuffer = await crypto.subtle.digest("MD5", combined);
+  return new Uint8Array(hashBuffer);
+}
+
+async function sha256(input) {
+  const hashBuffer = await crypto.subtle.digest("SHA-256", input);
+  return new Uint8Array(hashBuffer);
+}
+
+async function kdf(key, path) {
+  // VMess KDF uses custom recursive HMAC
+  // Reference: https://github.com/v2ray/v2ray-core/blob/master/common/crypto/auth.go
+
+  // Create HMAC-SHA256
+  async function hmacSha256(key, data) {
+    const hmacKey = await crypto.subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    const signature = await crypto.subtle.sign("HMAC", hmacKey, data);
+    return new Uint8Array(signature);
+  }
+
+  // RecursiveHash implementation matching Rust code
+  async function recursiveHash(keyBytes, innerHashFn) {
+    return async (data) => {
+      // Prepare HMAC pads
+      const ipad = new Uint8Array(64);
+      const opad = new Uint8Array(64);
+
+      // Copy key into pads
+      ipad.set(keyBytes.slice(0, Math.min(64, keyBytes.length)));
+      opad.set(keyBytes.slice(0, Math.min(64, keyBytes.length)));
+
+      // XOR with HMAC constants
+      for (let i = 0; i < 64; i++) {
+        ipad[i] ^= 0x36;
+        opad[i] ^= 0x5c;
+      }
+
+      // Compute inner hash: H(ipad || data)
+      const innerData = new Uint8Array(ipad.length + data.length);
+      innerData.set(ipad);
+      innerData.set(data, ipad.length);
+      const innerResult = await innerHashFn(innerData);
+
+      // Compute outer hash: H(opad || innerResult)
+      const outerData = new Uint8Array(opad.length + innerResult.length);
+      outerData.set(opad);
+      outerData.set(innerResult, opad.length);
+      return await innerHashFn(outerData);
+    };
+  }
+
+  // Base SHA256 hash function
+  const sha256Hash = async (data) => {
+    return new Uint8Array(await crypto.subtle.digest("SHA-256", data));
+  };
+
+  // Build recursive hash chain
+  let currentHashFn = await recursiveHash(new TextEncoder().encode("VMess AEAD KDF"), sha256Hash);
+
+  for (const salt of path) {
+    const saltBytes = typeof salt === "string" ? new TextEncoder().encode(salt) : new Uint8Array(salt);
+    currentHashFn = await recursiveHash(saltBytes, currentHashFn);
+  }
+
+  // Final hash with key
+  return await currentHashFn(key);
+}
+
+async function aesGcmDecrypt(key, nonce, data, aad) {
+  const cryptoKey = await crypto.subtle.importKey("raw", key, { name: "AES-GCM" }, false, ["decrypt"]);
+
+  try {
+    const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv: nonce, additionalData: aad }, cryptoKey, data);
+    return new Uint8Array(decrypted);
+  } catch (e) {
+    throw new Error("AEAD decryption failed: " + e.message);
+  }
+}
+
+async function aesGcmEncrypt(key, nonce, data, aad) {
+  const cryptoKey = await crypto.subtle.importKey("raw", key, { name: "AES-GCM" }, false, ["encrypt"]);
+
+  const encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce, additionalData: aad }, cryptoKey, data);
+  return new Uint8Array(encrypted);
+}
+
+// Stream Protocol Handler
+async function readStreamHeader(buffer) {
+  try {
+    // For simplicity, we'll use a fixed UUID for decryption
+    // In production, this should be configured
+    const uuidString = "00000000-0000-0000-0000-000000000000";
+    const uuidBytes = new Uint8Array(
+      uuidString
+        .replace(/-/g, "")
+        .match(/.{1,2}/g)
+        .map((byte) => parseInt(byte, 16)),
+    );
+
+    // Create MD5 hash of UUID + constant
+    const authKey = await md5(
+      uuidBytes,
+      new TextEncoder().encode(atob("YzQ4NjE5ZmUtOGYwMi00OWUwLWI5ZTktZWRmNzYzZTE3ZTIx")),
+    );
+
+    // Read AEAD header structure
+    const authId = new Uint8Array(buffer.slice(0, 16));
+    const encryptedLength = new Uint8Array(buffer.slice(16, 34));
+    const nonce = new Uint8Array(buffer.slice(34, 42));
+
+    // Derive keys for length decryption
+    const lengthKey = (await kdf(authKey, [SALT_A1, authId, nonce])).slice(0, 16);
+
+    const lengthIv = (await kdf(authKey, [SALT_A2, authId, nonce])).slice(0, 12);
+
+    // Decrypt header length (AAD is authId)
+    const lengthBytes = await aesGcmDecrypt(lengthKey, lengthIv, encryptedLength, authId);
+    const headerLength = (lengthBytes[0] << 8) | lengthBytes[1];
+
+    // Read encrypted header payload (with 16 bytes GCM tag)
+    const encryptedHeader = new Uint8Array(buffer.slice(42, 42 + headerLength + 16));
+
+    // Derive keys for payload decryption
+    const payloadKey = (await kdf(authKey, [SALT_A3, authId, nonce])).slice(0, 16);
+
+    const payloadIv = (await kdf(authKey, [SALT_A4, authId, nonce])).slice(0, 12);
+
+    // Decrypt header payload (AAD is authId)
+    const headerPayload = await aesGcmDecrypt(payloadKey, payloadIv, encryptedHeader, authId);
+
+    // Debug logging
+    console.log("Header payload length:", headerPayload.length);
+    console.log("Header payload (hex):", arrayBufferToHex(headerPayload.buffer));
+
+    // Parse decrypted header - following exact Rust implementation order
+    const view = new DataView(headerPayload.buffer);
+    let offset = 0;
+
+    // Version (1 byte)
+    const version = view.getUint8(offset);
+    offset += 1;
+    console.log("[0] Version:", version, "| offset now:", offset);
+    if (version !== 1) {
+      return { hasError: true, message: `Invalid protocol version: ${version}` };
+    }
+
+    // IV (16 bytes)
+    const encIv = new Uint8Array(headerPayload.slice(offset, offset + 16));
+    offset += 16;
+    console.log("[1-16] IV read | offset now:", offset);
+
+    // Key (16 bytes)
+    const encKey = new Uint8Array(headerPayload.slice(offset, offset + 16));
+    offset += 16;
+    console.log("[17-32] Key read | offset now:", offset);
+
+    // Options (4 bytes total - Rust reads as array)
+    const options = new Uint8Array(headerPayload.slice(offset, offset + 4));
+    offset += 4;
+    console.log("[33-36] Options:", Array.from(options), "| offset now:", offset);
+
+    // Command (1 byte)
+    const cmd = view.getUint8(offset);
+    offset += 1;
+    console.log("[37] Command:", cmd, "| offset now:", offset);
+    const isUDP = cmd !== 0x01;
+
+    // Port (2 bytes, big-endian)
+    const portRemote = view.getUint16(offset, false);
+    offset += 2;
+    console.log("[38-39] Port:", portRemote, "| offset now:", offset);
+
+    // Address Type (1 byte)
+    const addressType = view.getUint8(offset);
+    offset += 1;
+    console.log("[40] Address type:", addressType, "| offset now:", offset);
+    let addressRemote = "";
+
+    // Parse address following Rust implementation
+    switch (addressType) {
+      case 1: // IPv4
+        addressRemote = `${view.getUint8(offset)}.${view.getUint8(offset + 1)}.${view.getUint8(offset + 2)}.${view.getUint8(offset + 3)}`;
+        offset += 4;
+        break;
+      case 2: // Domain (same as case 3 in Rust)
+      case 3: // Domain
+        const domainLength = view.getUint8(offset);
+        offset += 1;
+        addressRemote = new TextDecoder().decode(headerPayload.slice(offset, offset + domainLength));
+        offset += domainLength;
+        break;
+      case 4: // IPv6
+        const ipv6Parts = [];
+        for (let i = 0; i < 8; i++) {
+          ipv6Parts.push(view.getUint16(offset + i * 2, false).toString(16));
+        }
+        addressRemote = ipv6Parts.join(":");
+        offset += 16;
+        break;
+      default:
+        console.log("ERROR: Invalid address type:", addressType, "at offset:", offset - 1);
+        return { hasError: true, message: `Invalid address type: ${addressType} (hex: 0x${addressType.toString(16)})` };
+    }
+
+    console.log("Final parsed address:", addressRemote);
+
+    // Calculate raw data index: authId (16) + encryptedLength (18) + nonce (8) + encrypted header payload (headerLength + 16 GCM tag)
+    const rawDataIndex = 42 + headerLength + 16;
+
+    return {
+      hasError: false,
+      addressRemote,
+      addressType,
+      portRemote,
+      rawDataIndex,
+      rawClientData: buffer.slice(rawDataIndex),
+      version: new Uint8Array([options[0], 0]),
+      isUDP,
+      needsResponse: true,
+      responseOptions: options,
+      encKey: encKey,
+      encIv: encIv,
+    };
+  } catch (e) {
+    return {
+      hasError: true,
+      message: "Stream header parsing failed: " + e.message,
+    };
+  }
+}
+
 function readSsHeader(ssBuffer) {
   const view = new DataView(ssBuffer);
 
@@ -1021,7 +917,6 @@ function readSsHeader(ssBuffer) {
   const portIndex = addressValueIndex + addressLength;
   const portBuffer = ssBuffer.slice(portIndex, portIndex + 2);
   const portRemote = new DataView(portBuffer).getUint16(0);
-  
   return {
     hasError: false,
     addressRemote: addressValue,
@@ -1034,7 +929,7 @@ function readSsHeader(ssBuffer) {
   };
 }
 
-function readFlashHeader(buffer) {
+function readNekoHeader(buffer) {
   const version = new Uint8Array(buffer.slice(0, 1));
   let isUDP = false;
 
@@ -1050,7 +945,6 @@ function readFlashHeader(buffer) {
       message: `command ${cmd} is not supported`,
     };
   }
-  
   const portIndex = 18 + optLength + 1;
   const portBuffer = buffer.slice(portIndex, portIndex + 2);
   const portRemote = new DataView(portBuffer).getUint16(0);
@@ -1062,18 +956,17 @@ function readFlashHeader(buffer) {
   let addressLength = 0;
   let addressValueIndex = addressIndex + 1;
   let addressValue = "";
-  
   switch (addressType) {
-    case 1:
+    case 1: // For IPv4
       addressLength = 4;
       addressValue = new Uint8Array(buffer.slice(addressValueIndex, addressValueIndex + addressLength)).join(".");
       break;
-    case 2:
+    case 2: // For Domain
       addressLength = new Uint8Array(buffer.slice(addressValueIndex, addressValueIndex + 1))[0];
       addressValueIndex += 1;
       addressValue = new TextDecoder().decode(buffer.slice(addressValueIndex, addressValueIndex + addressLength));
       break;
-    case 3:
+    case 3: // For IPv6
       addressLength = 16;
       const dataView = new DataView(buffer.slice(addressValueIndex, addressValueIndex + addressLength));
       const ipv6 = [];
@@ -1085,10 +978,9 @@ function readFlashHeader(buffer) {
     default:
       return {
         hasError: true,
-        message: `invalid addressType is ${addressType}`,
+        message: `invild  addressType is ${addressType}`,
       };
   }
-  
   if (!addressValue) {
     return {
       hasError: true,
@@ -1120,7 +1012,6 @@ function readHorseHeader(buffer) {
   let isUDP = false;
   const view = new DataView(dataBuffer);
   const cmd = view.getUint8(0);
-  
   if (cmd == 3) {
     isUDP = true;
   } else if (cmd != 1) {
@@ -1131,18 +1022,17 @@ function readHorseHeader(buffer) {
   let addressLength = 0;
   let addressValueIndex = 2;
   let addressValue = "";
-  
   switch (addressType) {
-    case 1:
+    case 1: // For IPv4
       addressLength = 4;
       addressValue = new Uint8Array(dataBuffer.slice(addressValueIndex, addressValueIndex + addressLength)).join(".");
       break;
-    case 3:
+    case 3: // For Domain
       addressLength = new Uint8Array(dataBuffer.slice(addressValueIndex, addressValueIndex + 1))[0];
       addressValueIndex += 1;
       addressValue = new TextDecoder().decode(dataBuffer.slice(addressValueIndex, addressValueIndex + addressLength));
       break;
-    case 4:
+    case 4: // For IPv6
       addressLength = 16;
       const dataView = new DataView(dataBuffer.slice(addressValueIndex, addressValueIndex + addressLength));
       const ipv6 = [];
@@ -1168,7 +1058,6 @@ function readHorseHeader(buffer) {
   const portIndex = addressValueIndex + addressLength;
   const portBuffer = dataBuffer.slice(portIndex, portIndex + 2);
   const portRemote = new DataView(portBuffer).getUint16(0);
-  
   return {
     hasError: false,
     addressRemote: addressValue,
@@ -1181,11 +1070,9 @@ function readHorseHeader(buffer) {
   };
 }
 
-// ==================== SOCKET HELPERS ====================
 async function remoteSocketToWS(remoteSocket, webSocket, responseHeader, retry, log) {
   let header = responseHeader;
   let hasIncomingData = false;
-  
   await remoteSocket.readable
     .pipeTo(
       new WritableStream({
@@ -1203,20 +1090,19 @@ async function remoteSocketToWS(remoteSocket, webSocket, responseHeader, retry, 
           }
         },
         close() {
-          log(`remoteConnection readable is close, hasIncomingData: ${hasIncomingData}`);
+          log(`remoteConnection!.readable is close with hasIncomingData is ${hasIncomingData}`);
         },
         abort(reason) {
-          console.error(`remoteConnection readable abort`, reason);
+          console.error(`remoteConnection!.readable abort`, reason);
         },
-      })
+      }),
     )
     .catch((error) => {
-      console.error(`remoteSocketToWS has exception`, error.stack || error);
+      console.error(`remoteSocketToWS has exception `, error.stack || error);
       safeCloseWebSocket(webSocket);
     });
-    
   if (hasIncomingData === false && retry) {
-    log(`No incoming data, retrying...`);
+    log(`retry`);
     retry();
   }
 }
@@ -1231,7 +1117,12 @@ function safeCloseWebSocket(socket) {
   }
 }
 
-// ==================== HELPERS ====================
+async function checkPrxHealth(prxIP, prxPort) {
+  const req = await fetch(`${PRX_HEALTH_CHECK_API}?ip=${prxIP}:${prxPort}`);
+  return await req.json();
+}
+
+// Helpers
 function base64ToArrayBuffer(base64Str) {
   if (!base64Str) {
     return { error: null };
@@ -1248,4 +1139,30 @@ function base64ToArrayBuffer(base64Str) {
 
 function arrayBufferToHex(buffer) {
   return [...new Uint8Array(buffer)].map((x) => x.toString(16).padStart(2, "0")).join("");
+}
+
+function shuffleArray(array) {
+  let currentIndex = array.length;
+
+  // While there remain elements to shuffle...
+  while (currentIndex != 0) {
+    // Pick a remaining element...
+    let randomIndex = Math.floor(Math.random() * currentIndex);
+    currentIndex--;
+
+    // And swap it with the current element.
+    [array[currentIndex], array[randomIndex]] = [array[randomIndex], array[currentIndex]];
+  }
+}
+
+function reverse(s) {
+  return s.split("").reverse().join("");
+}
+
+function getFlagEmoji(isoCode) {
+  const codePoints = isoCode
+    .toUpperCase()
+    .split("")
+    .map((char) => 127397 + char.charCodeAt(0));
+  return String.fromCodePoint(...codePoints);
 }
